@@ -6,7 +6,7 @@
 
 ## Overview
 
-This directory contains guidelines for backend development. Fill in each file with your project's specific conventions.
+This directory contains guidelines for backend development. Each file documents the team's actual coding conventions extracted from the codebase.
 
 ---
 
@@ -14,25 +14,36 @@ This directory contains guidelines for backend development. Fill in each file wi
 
 | Guide | Description | Status |
 |-------|-------------|--------|
-| [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
-| [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
-| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
-| [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
+| [Directory Structure](./directory-structure.md) | Module organization and file layout | ✅ Filled |
+| [Database Guidelines](./database-guidelines.md) | No database — file-based state patterns | ✅ Filled |
+| [Error Handling](./error-handling.md) | Custom exceptions, retry patterns, error-to-stream conversion | ✅ Filled |
+| [Quality Guidelines](./quality-guidelines.md) | Ruff, mypy, pytest, CI, code review | ✅ Filled |
+| [Logging Guidelines](./logging-guidelines.md) | Python stdlib logging, %s-format, log levels | ✅ Filled |
 
 ---
 
-## How to Fill These Guidelines
+## Quick Reference
 
-For each guideline file:
-
-1. Document your project's **actual conventions** (not ideals)
-2. Include **code examples** from your codebase
-3. List **forbidden patterns** and why
-4. Add **common mistakes** your team has made
-
-The goal is to help AI assistants and new team members understand how YOUR project works.
+- **Language**: Python 3.11 (target), 3.10+ supported
+- **CLI Framework**: Typer
+- **Validation**: Pydantic v2
+- **Testing**: pytest with pytest-asyncio
+- **Linting**: Ruff (line length 100)
+- **Type Checking**: mypy (strict mode)
+- **Logging**: Python stdlib `logging` module
+- **State Storage**: File-based (JSON/YAML), no database
 
 ---
 
-**Language**: All documentation should be written in **English**.
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `pyproject.toml` | Project config, dependencies, tool settings |
+| `src/openharness/cli.py` | Main CLI entry point |
+| `tests/conftest.py` | Shared test fixtures |
+| `.github/workflows/ci.yml` | CI pipeline |
+
+---
+
+**Language**: All documentation is written in **English**.

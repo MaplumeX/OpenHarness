@@ -6,46 +6,37 @@
 
 ## Overview
 
-<!--
-Document your project's database conventions here.
-
-Questions to answer:
-- What ORM/query library do you use?
-- How are migrations managed?
-- What are the naming conventions for tables/columns?
-- How do you handle transactions?
--->
-
-(To be filled by the team)
+**This project does not use a database.** All persistent state is file-based (JSON/YAML files on disk). There is no ORM, no migrations, and no SQL.
 
 ---
 
-## Query Patterns
+## State Storage Patterns
 
-<!-- How should queries be written? Batch operations? -->
-
-(To be filled by the team)
-
----
-
-## Migrations
-
-<!-- How to create and run migrations -->
-
-(To be filled by the team)
+| Storage Type | Location | Implementation |
+|--------------|----------|----------------|
+| Session storage | JSON files | `src/openharness/services/session_storage.py` |
+| Workspace state | JSON/YAML files | `ohmo/workspace.py` |
+| Gateway config | JSON files | `ohmo/gateway/config.py` |
+| Memory | Markdown files | `src/openharness/memory/memdir.py` |
+| Credentials | Keyring or filesystem | `src/openharness/auth/storage.py` |
+| Autopilot state | File-based registry/journal | `src/openharness/autopilot/service.py` |
+| Cron jobs | YAML/JSON files | `src/openharness/services/cron.py` |
 
 ---
 
-## Naming Conventions
+## File-Based State Best Practices
 
-<!-- Table names, column names, index names -->
+When adding new persistent state:
 
-(To be filled by the team)
+1. **Use Pydantic models** for schema validation (e.g., `GatewayState`, `WorkSecret`).
+2. **Atomic writes** — write to a temp file, then rename.
+3. **Graceful degradation** — if read fails, start with empty/default state.
+4. **No locking for reads** — files are assumed to be single-writer.
 
 ---
 
 ## Common Mistakes
 
-<!-- Database-related mistakes your team has made -->
-
-(To be filled by the team)
+- **Storing large binary data** — use external files and store paths instead.
+- **Not handling missing files** — always check `Path.exists()` before reading.
+- **Blocking I/O in async contexts** — use `aiofiles` or run in thread pool.

@@ -480,3 +480,280 @@ def test_autopilot_export_dashboard_cli(monkeypatch, tmp_path: Path):
 
     assert result.exit_code == 0
     assert "Exported autopilot dashboard" in result.output
+
+
+def test_setup_custom_provider_creates_profile(tmp_path: Path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("OPENHARNESS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    monkeypatch.setattr("openharness.cli._select_setup_workflow", lambda *a, **kw: "custom")
+
+    menu_selections = iter(["openai", "n"])
+    prompt_inputs = iter(
+        [
+            "my-provider",
+            "My Provider",
+            "https://api.example.com/v1",
+            "gpt-4o",
+        ]
+    )
+
+    monkeypatch.setattr(
+        "openharness.cli._select_from_menu",
+        lambda *a, **kw: next(menu_selections),
+    )
+    monkeypatch.setattr(
+        "openharness.cli._text_prompt",
+        lambda *a, **kw: next(prompt_inputs),
+    )
+    monkeypatch.setattr(
+        "openharness.cli._prompt_api_key_for_profile",
+        lambda label: "sk-test-custom",
+    )
+    monkeypatch.setattr(
+        "openharness.cli._prompt_model_for_profile",
+        lambda profile: "default",
+    )
+
+    result = runner.invoke(app, ["setup"])
+    assert result.exit_code == 0
+    assert "Setup complete:" in result.output
+    assert "- profile: my-provider" in result.output
+
+    settings = load_settings()
+    assert settings.active_profile == "my-provider"
+    profile = settings.resolve_profile()[1]
+    assert profile.provider == "openai"
+    assert profile.api_format == "openai"
+    assert profile.base_url == "https://api.example.com/v1"
+
+
+def test_setup_custom_provider_rejects_invalid_base_url(tmp_path: Path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("OPENHARNESS_CONFIG_DIR", str(tmp_path))
+
+    monkeypatch.setattr("openharness.cli._select_setup_workflow", lambda *a, **kw: "custom")
+
+    menu_selections = iter(["anthropic"])
+    prompt_inputs = iter(
+        [
+            "custom-anthropic",
+            "My Custom",
+            "not-a-url",
+        ]
+    )
+
+    monkeypatch.setattr(
+        "openharness.cli._select_from_menu",
+        lambda *a, **kw: next(menu_selections),
+    )
+    monkeypatch.setattr(
+        "openharness.cli._text_prompt",
+        lambda *a, **kw: next(prompt_inputs),
+    )
+
+    result = runner.invoke(app, ["setup"])
+    assert result.exit_code != 0
+    assert "must start with http:// or https://" in (result.output + str(result.exception or ""))
+
+
+def test_setup_custom_provider_duplicate_name_overwrite(tmp_path: Path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("OPENHARNESS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    monkeypatch.setattr("openharness.cli._select_setup_workflow", lambda *a, **kw: "custom")
+
+    menu_selections = iter(["openai"])
+    prompt_inputs = iter(
+        [
+            "claude-api",
+            "y",
+            "Overwritten Claude",
+            "https://custom.example.com/v1",
+            "gpt-4o",
+        ]
+    )
+
+    monkeypatch.setattr(
+        "openharness.cli._select_from_menu",
+        lambda *a, **kw: next(menu_selections),
+    )
+    monkeypatch.setattr(
+        "openharness.cli._text_prompt",
+        lambda *a, **kw: next(prompt_inputs),
+    )
+    monkeypatch.setattr(
+        "openharness.cli._prompt_api_key_for_profile",
+        lambda label: "sk-test-overwrite",
+    )
+    monkeypatch.setattr(
+        "openharness.cli._prompt_model_for_profile",
+        lambda profile: "default",
+    )
+
+    result = runner.invoke(app, ["setup"])
+    assert result.exit_code == 0
+    assert "Setup complete:" in result.output
+
+    settings = load_settings()
+    profile = settings.resolve_profile()[1]
+    assert profile.provider == "openai"
+    assert profile.base_url == "https://custom.example.com/v1"
+
+
+def test_setup_custom_provider_duplicate_name_abort(tmp_path: Path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("OPENHARNESS_CONFIG_DIR", str(tmp_path))
+
+    monkeypatch.setattr("openharness.cli._select_setup_workflow", lambda *a, **kw: "custom")
+
+    menu_selections = iter(["openai"])
+    prompt_inputs = iter(
+        [
+            "claude-api",
+            "n",
+        ]
+    )
+
+    monkeypatch.setattr(
+        "openharness.cli._select_from_menu",
+        lambda *a, **kw: next(menu_selections),
+    )
+    monkeypatch.setattr(
+        "openharness.cli._text_prompt",
+        lambda *a, **kw: next(prompt_inputs),
+    )
+
+    result = runner.invoke(app, ["setup"])
+    assert result.exit_code != 0
+
+
+def test_setup_custom_profile_direct_argument(tmp_path: Path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("OPENHARNESS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    # Direct invocation: `oh setup custom` skips the workflow selector
+    menu_selections = iter(["anthropic"])
+    prompt_inputs = iter(
+        [
+            "custom-claude",
+            "Custom Claude",
+            "https://claude-proxy.example.com",
+            "claude-sonnet-4-6",
+        ]
+    )
+
+    monkeypatch.setattr(
+        "openharness.cli._select_from_menu",
+        lambda *a, **kw: next(menu_selections),
+    )
+    monkeypatch.setattr(
+        "openharness.cli._text_prompt",
+        lambda *a, **kw: next(prompt_inputs),
+    )
+    monkeypatch.setattr(
+        "openharness.cli._prompt_api_key_for_profile",
+        lambda label: "sk-custom-claude",
+    )
+    monkeypatch.setattr(
+        "openharness.cli._prompt_model_for_profile",
+        lambda profile: "default",
+    )
+
+    result = runner.invoke(app, ["setup", "custom"])
+    assert result.exit_code == 0
+    assert "Setup complete:" in result.output
+    assert "- profile: custom-claude" in result.output
+
+
+def test_setup_custom_provider_rejects_empty_base_url(tmp_path: Path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("OPENHARNESS_CONFIG_DIR", str(tmp_path))
+
+    monkeypatch.setattr("openharness.cli._select_setup_workflow", lambda *a, **kw: "custom")
+
+    menu_selections = iter(["openai"])
+    prompt_inputs = iter(
+        [
+            "custom-openai",
+            "My OpenAI",
+            "",
+        ]
+    )
+
+    monkeypatch.setattr(
+        "openharness.cli._select_from_menu",
+        lambda *a, **kw: next(menu_selections),
+    )
+    monkeypatch.setattr(
+        "openharness.cli._text_prompt",
+        lambda *a, **kw: next(prompt_inputs),
+    )
+
+    result = runner.invoke(app, ["setup"])
+    assert result.exit_code != 0
+    assert "Base URL cannot be empty" in (result.output + str(result.exception or ""))
+
+
+def test_setup_custom_provider_rejects_empty_name(tmp_path: Path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("OPENHARNESS_CONFIG_DIR", str(tmp_path))
+
+    monkeypatch.setattr("openharness.cli._select_setup_workflow", lambda *a, **kw: "custom")
+
+    menu_selections = iter(["openai"])
+    # First prompt is profile name -- simulate empty input
+    prompt_inputs = iter(
+        [
+            "",
+        ]
+    )
+
+    monkeypatch.setattr(
+        "openharness.cli._select_from_menu",
+        lambda *a, **kw: next(menu_selections),
+    )
+    monkeypatch.setattr(
+        "openharness.cli._text_prompt",
+        lambda *a, **kw: next(prompt_inputs),
+    )
+
+    result = runner.invoke(app, ["setup"])
+    assert result.exit_code != 0
+    assert "Profile name cannot be empty" in (result.output + str(result.exception or ""))
+
+
+def test_setup_custom_provider_rejects_empty_model(tmp_path: Path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("OPENHARNESS_CONFIG_DIR", str(tmp_path))
+
+    monkeypatch.setattr("openharness.cli._select_setup_workflow", lambda *a, **kw: "custom")
+
+    menu_selections = iter(["openai"])
+    prompt_inputs = iter(
+        [
+            "custom-openai",
+            "My OpenAI",
+            "https://api.example.com/v1",
+            "",
+        ]
+    )
+
+    monkeypatch.setattr(
+        "openharness.cli._select_from_menu",
+        lambda *a, **kw: next(menu_selections),
+    )
+    monkeypatch.setattr(
+        "openharness.cli._text_prompt",
+        lambda *a, **kw: next(prompt_inputs),
+    )
+
+    result = runner.invoke(app, ["setup"])
+    assert result.exit_code != 0
+    assert "Default model cannot be empty" in (result.output + str(result.exception or ""))

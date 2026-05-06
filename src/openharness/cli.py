@@ -1415,6 +1415,14 @@ def _select_setup_workflow(
                     ]
             choices.append(questionary.Choice(title=title, value=name, checked=(name == default_value)))
 
+        # Add custom provider option
+        custom_hint = ("Any OpenAI/Anthropic-compatible API", "fg:#bb9af7")
+        custom_title = [
+            ("", "Custom provider  "),
+            (custom_hint[1], custom_hint[0]),
+        ]
+        choices.append(questionary.Choice(title=custom_title, value="custom", checked=("custom" == default_value)))
+
         result = questionary.select("Choose a provider workflow:", choices=choices, default=default_value).ask()
         if result is None:
             raise typer.Abort()
@@ -1427,6 +1435,7 @@ def _select_setup_workflow(
         if hint is not None:
             label = f"{label} ({hint[0]})"
         options.append((name, label))
+    options.append(("custom", "Custom provider (Any OpenAI/Anthropic-compatible API)"))
     return _select_from_menu("Choose a provider workflow:", options, default_value=default_value)
 
 
@@ -1462,10 +1471,16 @@ def _configure_custom_profile_via_setup(manager) -> str:
     name = _text_prompt("Profile name", default=default_name).strip()
     if not name:
         raise typer.BadParameter("Profile name cannot be empty.")
+    if name in manager.list_profiles():
+        overwrite = _text_prompt(f"Profile '{name}' already exists. Overwrite? (y/n)", default="n").strip().lower()
+        if overwrite != "y":
+            raise typer.Abort()
     label = _text_prompt("Display label", default=name).strip() or name
     base_url = _text_prompt("Base URL", default="").strip()
     if not base_url:
         raise typer.BadParameter("Base URL cannot be empty.")
+    if not base_url.startswith(("http://", "https://")):
+        raise typer.BadParameter("Base URL must start with http:// or https://.")
 
     auth_source = default_auth_source_for_provider(family, family)
     model = _text_prompt("Default model", default="").strip()
@@ -1587,6 +1602,9 @@ def _specialize_setup_target(manager, target: str) -> str:
             model=model,
             lock_model=False,
         )
+
+    if target == "custom":
+        return _configure_custom_profile_via_setup(manager)
 
     return target
 

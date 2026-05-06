@@ -38,3 +38,36 @@ Scanned codebase structure, error handling, logging, and quality patterns. Fille
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: oh setup 支持自定义提供商
+
+**Date**: 2026-05-06
+**Task**: oh setup 支持自定义提供商
+**Branch**: `main`
+
+### Summary
+
+在 oh setup 工作流选择器中添加 Custom provider 入口，增强 _configure_custom_profile_via_setup 支持重复名称提示和 Base URL 校验，新增 8 个单元测试覆盖
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `746f670` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

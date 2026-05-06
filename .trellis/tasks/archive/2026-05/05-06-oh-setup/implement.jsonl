@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "代码质量规范：实现时需遵循的错误处理和输入校验风格"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "错误处理规范：重复名称提示和 Base URL 校验需遵循项目错误处理约定"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "代码复用指南：复用已有 _configure_custom_profile_via_setup 和 upsert_profile 逻辑"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "日志规范：setup 流程中的用户提示和状态输出风格"}

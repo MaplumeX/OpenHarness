@@ -78,6 +78,63 @@ Each module under `src/openharness/` follows the same internal pattern:
 
 New features are added as a new subdirectory under `src/openharness/` with the same internal structure. See `channels/` as a well-organized example — it has a bus/events system plus per-channel implementations.
 
+### UI Session Turn Queue
+
+#### 1. Scope / Trigger
+
+Use a UI session turn queue when an interactive runtime accepts line-like work while another
+agent turn is active. The queue belongs at the UI/runtime boundary, not inside `engine/`, because
+`QueryEngine` already owns conversation state and `run_query()` already owns the model/tool loop.
+
+#### 2. Signatures
+
+- Module: `src/openharness/ui/session_queue.py`
+- Queue API: `SessionTurnQueue.enqueue(...)`, `dequeue()`, `remove(turn_id)`, `snapshot()`,
+  `empty()`, and `len(queue)`.
+- Protocol API: `BackendEvent(type="queue_snapshot", queue=SessionQueueSnapshot(...))`.
+
+#### 3. Contracts
+
+- Queue priorities are exactly `now`, `next`, and `later`; ordering is priority first, FIFO within
+  the same priority.
+- Queue kinds are line-like work only: `submit_line`, `apply_select_command`, and
+  `synthetic_followup`.
+- Queue snapshots expose `active`, `queued`, and `recent` turns with `id`, `kind`, `priority`,
+  `state`, `label`, `created_at`, and `metadata`.
+- Queued turns must execute through `src/openharness/ui/runtime.py::handle_line()` so slash
+  commands, snapshots, command-triggered prompts, and `/continue` stay centralized.
+
+#### 4. Validation & Error Matrix
+
+- Missing `submit_line.line` -> emit a protocol error and do not enqueue.
+- Missing `apply_select_command.command` or `.value` -> emit a protocol error and do not enqueue.
+- Permission and question responses -> resolve their pending futures immediately; never enqueue
+  them behind prompts.
+- Interrupt -> cancel only the active turn; queued turns remain queued unless a separate clear or
+  remove command exists.
+
+#### 5. Good/Base/Bad Cases
+
+- Good: busy UI receives a second user prompt, emits a queue snapshot, and drains the queued prompt
+  after the active turn completes.
+- Base: idle UI receives a prompt and executes it immediately through the same queued-turn executor.
+- Bad: a UI host starts a second `QueryEngine.submit_message()` while a turn is still active.
+
+#### 6. Tests Required
+
+- Unit tests for priority order, FIFO within priority, removal, and snapshot ordering.
+- Backend integration tests for busy enqueue, automatic drain, interrupt preserving queued turns,
+  and immediate permission/question response handling.
+- Protocol/UI tests or type checks for `queue_snapshot` payload compatibility.
+
+#### 7. Wrong vs Correct
+
+Wrong: using `BackgroundTaskManager` as the primary interactive prompt queue. Completed local-agent
+restart does not preserve process-local interactive context.
+
+Correct: keep session-turn ordering in `ui/session_queue.py`, then execute one turn at a time
+through `handle_line()` and the existing `QueryEngine` / `run_query` path.
+
 ---
 
 ## Naming Conventions

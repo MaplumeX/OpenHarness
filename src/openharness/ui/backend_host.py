@@ -8,15 +8,16 @@ import json
 import logging
 import os
 import sys
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Coroutine
+from typing import Any, Callable, Coroutine, Literal, cast
 from uuid import uuid4
 
 from openharness.api.client import SupportsStreamingMessages
 from openharness.auth.manager import AuthManager
-from openharness.commands import MemoryCommandBackend
-from openharness.config.settings import CLAUDE_MODEL_ALIAS_OPTIONS, resolve_model_setting
+from openharness.commands import CommandRegistry, MemoryCommandBackend
+from openharness.config.settings import CLAUDE_MODEL_ALIAS_OPTIONS, Settings, resolve_model_setting
 from openharness.bridge import get_bridge_manager
 from openharness.coordinator.coordinator_mode import is_coordinator_mode
 from openharness.themes import list_themes
@@ -33,15 +34,29 @@ from openharness.engine.stream_events import (
 from openharness.output_styles import load_output_styles
 from openharness.tasks import get_task_manager
 from openharness.ui.coordinator_drain import drain_coordinator_async_agents
-from openharness.ui.protocol import BackendEvent, FrontendRequest, TranscriptItem
-from openharness.ui.runtime import build_runtime, close_runtime, handle_line, start_runtime
+from openharness.ui.protocol import (
+    BackendEvent,
+    FrontendRequest,
+    QueueTurnSnapshot,
+    SessionQueueSnapshot,
+    TranscriptItem,
+)
+from openharness.ui.runtime import RuntimeBundle, build_runtime, close_runtime, handle_line, start_runtime
+from openharness.ui.session_queue import (
+    QueuedTurn,
+    QueuedTurnPriority,
+    SelectedCommandApplication,
+    SessionTurnQueue,
+    SyntheticFollowup,
+    UserSubmittedLine,
+)
 from openharness.services.session_backend import SessionBackend
 
 log = logging.getLogger(__name__)
 
-log = logging.getLogger(__name__)
-
 _PROTOCOL_PREFIX = "OHJSON:"
+
+QueueTurnState = Literal["queued", "running", "completed", "cancelled"]
 
 
 @dataclass(frozen=True)
@@ -57,7 +72,7 @@ class BackendHostConfig:
     active_profile: str | None = None
     api_client: SupportsStreamingMessages | None = None
     cwd: str | None = None
-    restore_messages: list[dict] | None = None
+    restore_messages: list[dict[str, Any]] | None = None
     restore_tool_metadata: dict[str, object] | None = None
     enforce_max_turns: bool = True
     permission_mode: str | None = None
@@ -73,7 +88,7 @@ class ReactBackendHost:
 
     def __init__(self, config: BackendHostConfig) -> None:
         self._config = config
-        self._bundle = None
+        self._bundle: RuntimeBundle | None = None
         self._write_lock = asyncio.Lock()
         self._request_queue: asyncio.Queue[FrontendRequest] = asyncio.Queue()
         self._permission_requests: dict[str, asyncio.Future[bool]] = {}
@@ -82,8 +97,13 @@ class ReactBackendHost:
         self._busy = False
         self._running = True
         self._active_request_task: asyncio.Task[bool] | None = None
+        self._active_request_cancelled = False
+        self._turn_queue = SessionTurnQueue()
+        self._active_turn: QueuedTurn | None = None
+        self._recent_turns: deque[QueueTurnSnapshot] = deque(maxlen=20)
+        self._drain_task: asyncio.Task[None] | None = None
         # Track last tool input per name for rich event emission
-        self._last_tool_inputs: dict[str, dict] = {}
+        self._last_tool_inputs: dict[str, dict[str, Any]] = {}
 
     async def run(self) -> int:
         self._bundle = await build_runtime(
@@ -109,21 +129,23 @@ class ReactBackendHost:
             include_project_memory=self._config.include_project_memory,
         )
         await start_runtime(self._bundle)
+        commands = cast(CommandRegistry, self._bundle.commands)
         await self._emit(
             BackendEvent.ready(
                 self._bundle.app_state.get(),
                 get_task_manager().list_tasks(),
-                [f"/{command.name}" for command in self._bundle.commands.list_commands()],
+                [f"/{command.name}" for command in commands.list_commands()],
             )
         )
         await self._emit(self._status_snapshot())
+        await self._emit_queue_snapshot()
 
         reader = asyncio.create_task(self._read_requests())
         try:
             while self._running:
                 request = await self._request_queue.get()
                 if request.type == "shutdown":
-                    await self._emit(BackendEvent(type="shutdown"))
+                    await self._shutdown()
                     break
                 if request.type == "interrupt":
                     await self._interrupt_active_request()
@@ -137,41 +159,23 @@ class ReactBackendHost:
                     await self._handle_select_command(request.command or "")
                     continue
                 if request.type == "apply_select_command":
-                    if self._busy:
-                        await self._emit(BackendEvent(type="error", message="Session is busy"))
-                        continue
-                    self._busy = True
-                    try:
-                        should_continue = await self._run_active_request(
-                            self._apply_select_command(
-                                request.command or "",
-                                request.value or "",
-                            )
-                        )
-                    finally:
-                        self._busy = False
-                    if not should_continue:
-                        await self._emit(BackendEvent(type="shutdown"))
-                        break
+                    await self._enqueue_apply_select_command(
+                        request.command or "",
+                        request.value or "",
+                    )
                     continue
                 if request.type != "submit_line":
                     await self._emit(BackendEvent(type="error", message=f"Unknown request type: {request.type}"))
                     continue
-                if self._busy:
-                    await self._emit(BackendEvent(type="error", message="Session is busy"))
-                    continue
                 line = (request.line or "").strip()
                 if not line:
                     continue
-                self._busy = True
-                try:
-                    should_continue = await self._run_active_request(self._process_line(line))
-                finally:
-                    self._busy = False
-                if not should_continue:
-                    await self._emit(BackendEvent(type="shutdown"))
-                    break
+                await self._enqueue_submit_line(line)
         finally:
+            if self._drain_task is not None and not self._drain_task.done():
+                self._drain_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._drain_task
             reader.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await reader
@@ -194,14 +198,14 @@ class ReactBackendHost:
                 await self._emit(BackendEvent(type="error", message=f"Invalid request: {exc}"))
                 continue
             if request.type == "permission_response" and request.request_id in self._permission_requests:
-                future = self._permission_requests[request.request_id]
-                if not future.done():
-                    future.set_result(bool(request.allowed))
+                permission_future = self._permission_requests[request.request_id]
+                if not permission_future.done():
+                    permission_future.set_result(bool(request.allowed))
                 continue
             if request.type == "question_response" and request.request_id in self._question_requests:
-                future = self._question_requests[request.request_id]
-                if not future.done():
-                    future.set_result(request.answer or "")
+                question_future = self._question_requests[request.request_id]
+                if not question_future.done():
+                    question_future.set_result(request.answer or "")
                 continue
             if request.type == "interrupt":
                 await self._interrupt_active_request()
@@ -211,9 +215,11 @@ class ReactBackendHost:
     async def _run_active_request(self, awaitable: Coroutine[Any, Any, bool]) -> bool:
         task = asyncio.create_task(awaitable)
         self._active_request_task = task
+        self._active_request_cancelled = False
         try:
             return await task
         except asyncio.CancelledError:
+            self._active_request_cancelled = True
             await self._emit(
                 BackendEvent(
                     type="transcript_item",
@@ -227,6 +233,100 @@ class ReactBackendHost:
         finally:
             if self._active_request_task is task:
                 self._active_request_task = None
+
+    async def _enqueue_submit_line(
+        self,
+        line: str,
+        *,
+        priority: QueuedTurnPriority = "next",
+    ) -> QueuedTurn:
+        turn = self._turn_queue.enqueue(
+            kind="submit_line",
+            payload=UserSubmittedLine(line=line),
+            priority=priority,
+        )
+        await self._emit_queue_snapshot()
+        self._ensure_drain_task()
+        return turn
+
+    async def _enqueue_apply_select_command(
+        self,
+        command: str,
+        value: str,
+        *,
+        priority: QueuedTurnPriority = "next",
+    ) -> QueuedTurn:
+        turn = self._turn_queue.enqueue(
+            kind="apply_select_command",
+            payload=SelectedCommandApplication(command=command, value=value),
+            priority=priority,
+        )
+        await self._emit_queue_snapshot()
+        self._ensure_drain_task()
+        return turn
+
+    async def _enqueue_synthetic_followup(
+        self,
+        message: str,
+        *,
+        transcript_line: str | None = None,
+        priority: QueuedTurnPriority = "later",
+    ) -> QueuedTurn:
+        turn = self._turn_queue.enqueue(
+            kind="synthetic_followup",
+            payload=SyntheticFollowup(message=message, transcript_line=transcript_line),
+            priority=priority,
+        )
+        await self._emit_queue_snapshot()
+        self._ensure_drain_task()
+        return turn
+
+    def _ensure_drain_task(self) -> None:
+        if self._drain_task is not None and not self._drain_task.done():
+            return
+        self._drain_task = asyncio.create_task(self._drain_turn_queue())
+
+    async def _drain_turn_queue(self) -> None:
+        while self._running:
+            turn = self._turn_queue.dequeue()
+            if turn is None:
+                await self._emit_queue_snapshot()
+                return
+            self._active_turn = turn
+            self._busy = True
+            await self._emit_queue_snapshot()
+            should_continue = await self._run_active_request(self._execute_turn(turn))
+            was_cancelled = self._active_request_cancelled
+            self._recent_turns.append(self._turn_snapshot(turn, "cancelled" if was_cancelled else "completed"))
+            self._active_turn = None
+            self._busy = False
+            await self._emit_queue_snapshot()
+            if was_cancelled:
+                return
+            if not should_continue:
+                await self._shutdown()
+                return
+
+    async def _execute_turn(self, turn: QueuedTurn) -> bool:
+        payload = turn.payload
+        if isinstance(payload, UserSubmittedLine):
+            return await self._process_line(payload.line)
+        if isinstance(payload, SelectedCommandApplication):
+            return await self._apply_select_command(payload.command, payload.value)
+        if isinstance(payload, SyntheticFollowup):
+            return await self._process_line(
+                payload.message,
+                transcript_line=payload.transcript_line,
+            )
+        raise AssertionError(f"Unsupported queued turn payload: {type(payload).__name__}")
+
+    async def _shutdown(self) -> None:
+        was_running = self._running
+        self._running = False
+        await self._interrupt_active_request()
+        if was_running:
+            await self._emit(BackendEvent(type="shutdown"))
+            await self._request_queue.put(FrontendRequest(type="shutdown"))
 
     async def _interrupt_active_request(self) -> None:
         task = self._active_request_task
@@ -406,6 +506,36 @@ class ReactBackendHost:
             bridge_sessions=get_bridge_manager().list_sessions(),
         )
 
+    async def _emit_queue_snapshot(self) -> None:
+        await self._emit(BackendEvent(type="queue_snapshot", queue=self._queue_snapshot()))
+
+    def _queue_snapshot(self) -> SessionQueueSnapshot:
+        active = self._turn_snapshot(self._active_turn, "running") if self._active_turn else None
+        queued = [
+            self._turn_snapshot(turn, "queued")
+            for turn in self._turn_queue.snapshot()
+        ]
+        return SessionQueueSnapshot(
+            active=active,
+            queued=queued,
+            recent=list(self._recent_turns),
+        )
+
+    def _turn_snapshot(
+        self,
+        turn: QueuedTurn,
+        state: QueueTurnState,
+    ) -> QueueTurnSnapshot:
+        return QueueTurnSnapshot(
+            id=turn.id,
+            kind=turn.kind,
+            priority=turn.priority,
+            state=state,
+            label=turn.label,
+            created_at=turn.created_at,
+            metadata=turn.metadata,
+        )
+
     async def _emit_todo_update_from_output(self, output: str) -> None:
         """Emit a todo_update event by extracting markdown checklist from tool output."""
         # TodoWrite tools typically echo back the written content
@@ -416,7 +546,11 @@ class ReactBackendHost:
             markdown = "\n".join(checklist_lines)
             await self._emit(BackendEvent(type="todo_update", todo_markdown=markdown))
 
-    def _emit_swarm_status(self, teammates: list[dict], notifications: list[dict] | None = None) -> None:
+    def _emit_swarm_status(
+        self,
+        teammates: list[dict[str, Any]],
+        notifications: list[dict[str, Any]] | None = None,
+    ) -> None:
         """Emit a swarm_status event synchronously (schedule as coroutine)."""
         import asyncio
         loop = asyncio.get_event_loop()
@@ -452,7 +586,8 @@ class ReactBackendHost:
             await self._handle_list_sessions()
             return
 
-        settings = self._bundle.current_settings()
+        current_settings = cast(Callable[[], Settings], self._bundle.current_settings)
+        settings = current_settings()
         state = self._bundle.app_state.get()
         _, active_profile = settings.resolve_profile()
         current_model = settings.model
@@ -575,13 +710,13 @@ class ReactBackendHost:
             return
 
         if command == "turns":
-            current = self._bundle.engine.max_turns
+            current_turns = self._bundle.engine.max_turns
             values = {32, 64, 128, 200, 256, 512}
-            if isinstance(current, int):
-                values.add(current)
-            options = [{"value": "unlimited", "label": "Unlimited", "description": "Do not hard-stop this session", "active": current is None}]
+            if isinstance(current_turns, int):
+                values.add(current_turns)
+            options = [{"value": "unlimited", "label": "Unlimited", "description": "Do not hard-stop this session", "active": current_turns is None}]
             options.extend(
-                {"value": str(value), "label": f"{value} turns", "active": value == current}
+                {"value": str(value), "label": f"{value} turns", "active": value == current_turns}
                 for value in sorted(values)
             )
             await self._emit(
@@ -798,7 +933,7 @@ async def run_backend_host(
     active_profile: str | None = None,
     cwd: str | None = None,
     api_client: SupportsStreamingMessages | None = None,
-    restore_messages: list[dict] | None = None,
+    restore_messages: list[dict[str, Any]] | None = None,
     restore_tool_metadata: dict[str, object] | None = None,
     enforce_max_turns: bool = True,
     permission_mode: str | None = None,

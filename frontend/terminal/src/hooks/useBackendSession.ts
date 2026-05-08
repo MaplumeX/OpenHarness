@@ -8,6 +8,7 @@ import type {
 	FrontendConfig,
 	McpServerSnapshot,
 	SelectOptionPayload,
+	SessionQueueSnapshot,
 	SwarmNotificationSnapshot,
 	SwarmTeammateSnapshot,
 	TaskSnapshot,
@@ -20,12 +21,14 @@ const ASSISTANT_DELTA_FLUSH_CHARS = 384;
 const TRANSCRIPT_EVENT_FLUSH_MS = 50;
 
 const stableStringify = (value: unknown): string => JSON.stringify(value);
+const emptyQueueSnapshot = (): SessionQueueSnapshot => ({active: null, queued: [], recent: []});
 
 export function useBackendSession(config: FrontendConfig, onExit: (code?: number | null) => void) {
 	const [transcript, setTranscript] = useState<TranscriptItem[]>([]);
 	const [assistantBuffer, setAssistantBuffer] = useState('');
 	const [status, setStatus] = useState<Record<string, unknown>>({});
 	const [tasks, setTasks] = useState<TaskSnapshot[]>([]);
+	const [queue, setQueue] = useState<SessionQueueSnapshot>(emptyQueueSnapshot);
 	const [commands, setCommands] = useState<string[]>([]);
 	const [mcpServers, setMcpServers] = useState<McpServerSnapshot[]>([]);
 	const [bridgeSessions, setBridgeSessions] = useState<BridgeSessionSnapshot[]>([]);
@@ -245,6 +248,15 @@ export function useBackendSession(config: FrontendConfig, onExit: (code?: number
 			}
 			return;
 		}
+		if (event.type === 'queue_snapshot') {
+			if (event.queue?.active) {
+				setBusy(true);
+			}
+			startTransition(() => {
+				setQueue(event.queue ?? emptyQueueSnapshot());
+			});
+			return;
+		}
 		if (event.type === 'transcript_item' && event.item) {
 			queueTranscriptItem(event.item as TranscriptItem);
 			return;
@@ -440,6 +452,7 @@ export function useBackendSession(config: FrontendConfig, onExit: (code?: number
 			assistantBuffer,
 			status,
 			tasks,
+			queue,
 			commands,
 			mcpServers,
 			bridgeSessions,
@@ -457,6 +470,6 @@ export function useBackendSession(config: FrontendConfig, onExit: (code?: number
 			setBusyLabel,
 			sendRequest,
 		}),
-		[assistantBuffer, bridgeSessions, busy, busyLabel, commands, mcpServers, modal, ready, selectRequest, status, swarmNotifications, swarmTeammates, tasks, todoMarkdown, transcript]
+		[assistantBuffer, bridgeSessions, busy, busyLabel, commands, mcpServers, modal, queue, ready, selectRequest, status, swarmNotifications, swarmTeammates, tasks, todoMarkdown, transcript]
 	);
 }

@@ -241,7 +241,7 @@ function AppInner({config}: {config: FrontendConfig}): React.JSX.Element {
 				setModalInput('');
 				return;
 			}
-			if (!session.modal && !session.busy && input.trim()) {
+			if (!session.modal && input.trim()) {
 				onSubmit(input);
 				return;
 			}
@@ -373,12 +373,20 @@ function AppInner({config}: {config: FrontendConfig}): React.JSX.Element {
 			setModalInput('');
 			return;
 		}
-		if (!value.trim() || session.busy || !session.ready) {
-			if (session.busy && value.trim() === '/stop') {
-				session.sendRequest({type: 'interrupt'});
-				session.setBusyLabel('Stopping current operation...');
-				setInput('');
-			}
+		if (session.busy && value.trim() === '/stop') {
+			session.sendRequest({type: 'interrupt'});
+			session.setBusyLabel('Stopping current operation...');
+			setInput('');
+			return;
+		}
+		if (!value.trim() || !session.ready) {
+			return;
+		}
+		if (session.busy) {
+			session.sendRequest({type: 'submit_line', line: value});
+			setHistory((items) => [...items, value]);
+			setHistoryIndex(-1);
+			setInput('');
 			return;
 		}
 		// Check if it's an interactive command
@@ -459,7 +467,12 @@ function AppInner({config}: {config: FrontendConfig}): React.JSX.Element {
 
 			{/* Status bar (only after backend is ready) */}
 			{session.ready ? (
-				<StatusBar status={deferredStatus} tasks={deferredTasks} activeToolName={session.busy ? currentToolName : undefined} />
+				<StatusBar
+					status={deferredStatus}
+					tasks={deferredTasks}
+					queue={session.queue}
+					activeToolName={session.busy ? currentToolName : undefined}
+				/>
 			) : null}
 
 			{/* Input — show loading indicator until backend is ready */}

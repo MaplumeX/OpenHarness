@@ -63,6 +63,26 @@ class TaskSnapshot(BaseModel):
         )
 
 
+class QueueTurnSnapshot(BaseModel):
+    """UI-safe queued/running/recent turn representation."""
+
+    id: str
+    kind: str
+    priority: str
+    state: Literal["queued", "running", "completed", "cancelled"]
+    label: str
+    created_at: float
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class SessionQueueSnapshot(BaseModel):
+    """Current session queue state."""
+
+    active: QueueTurnSnapshot | None = None
+    queued: list[QueueTurnSnapshot] = Field(default_factory=list)
+    recent: list[QueueTurnSnapshot] = Field(default_factory=list)
+
+
 class BackendEvent(BaseModel):
     """One event sent from the Python backend to the React frontend."""
 
@@ -70,6 +90,7 @@ class BackendEvent(BaseModel):
         "ready",
         "state_snapshot",
         "tasks_snapshot",
+        "queue_snapshot",
         "transcript_item",
         "compact_progress",
         "assistant_delta",
@@ -91,6 +112,7 @@ class BackendEvent(BaseModel):
     item: TranscriptItem | None = None
     state: dict[str, Any] | None = None
     tasks: list[TaskSnapshot] | None = None
+    queue: SessionQueueSnapshot | None = None
     mcp_servers: list[dict[str, Any]] | None = None
     bridge_sessions: list[dict[str, Any]] | None = None
     commands: list[str] | None = None
@@ -217,6 +239,8 @@ def _format_permission_mode(raw: str) -> str:
 __all__ = [
     "BackendEvent",
     "FrontendRequest",
+    "QueueTurnSnapshot",
+    "SessionQueueSnapshot",
     "TaskSnapshot",
     "TranscriptItem",
 ]

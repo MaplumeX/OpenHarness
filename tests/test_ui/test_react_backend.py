@@ -180,6 +180,110 @@ async def test_run_active_request_recovers_from_cancel(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_backend_host_queues_turns_while_active_and_drains_fifo():
+    host = ReactBackendHost(BackendHostConfig(api_client=StaticApiClient("unused")))
+    events: list[BackendEvent] = []
+    processed: list[str] = []
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def _emit(event: BackendEvent) -> None:
+        events.append(event)
+
+    async def _fake_process_line(line: str, *, transcript_line: str | None = None) -> bool:
+        processed.append(transcript_line or line)
+        if line == "first":
+            first_started.set()
+            await release_first.wait()
+        return True
+
+    host._emit = _emit  # type: ignore[method-assign]
+    host._process_line = _fake_process_line  # type: ignore[method-assign]
+
+    await host._enqueue_submit_line("first")
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    await host._enqueue_submit_line("second")
+
+    snapshot = host._queue_snapshot()
+    assert snapshot.active is not None
+    assert snapshot.active.label == "first"
+    assert [turn.label for turn in snapshot.queued] == ["second"]
+    assert any(event.type == "queue_snapshot" and event.queue for event in events)
+
+    release_first.set()
+    assert host._drain_task is not None
+    await asyncio.wait_for(host._drain_task, timeout=1)
+
+    assert processed == ["first", "second"]
+    final_snapshot = host._queue_snapshot()
+    assert final_snapshot.active is None
+    assert final_snapshot.queued == []
+    assert [turn.label for turn in final_snapshot.recent] == ["first", "second"]
+    assert [turn.state for turn in final_snapshot.recent] == ["completed", "completed"]
+
+
+@pytest.mark.asyncio
+async def test_backend_host_interrupt_cancels_active_turn_and_leaves_queue():
+    host = ReactBackendHost(BackendHostConfig(api_client=StaticApiClient("unused")))
+    events: list[BackendEvent] = []
+    first_started = asyncio.Event()
+
+    async def _emit(event: BackendEvent) -> None:
+        events.append(event)
+
+    async def _fake_process_line(line: str, *, transcript_line: str | None = None) -> bool:
+        del transcript_line
+        if line == "first":
+            first_started.set()
+            await asyncio.Event().wait()
+        return True
+
+    host._emit = _emit  # type: ignore[method-assign]
+    host._status_snapshot = lambda: BackendEvent(type="state_snapshot", state={})  # type: ignore[method-assign]
+    host._process_line = _fake_process_line  # type: ignore[method-assign]
+
+    await host._enqueue_submit_line("first")
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    await host._enqueue_submit_line("second")
+    await host._interrupt_active_request()
+
+    assert host._drain_task is not None
+    await asyncio.wait_for(host._drain_task, timeout=1)
+
+    snapshot = host._queue_snapshot()
+    assert snapshot.active is None
+    assert [turn.label for turn in snapshot.queued] == ["second"]
+    assert [(turn.label, turn.state) for turn in snapshot.recent] == [("first", "cancelled")]
+    assert any(event.type == "line_complete" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_backend_host_synthetic_followup_uses_process_line():
+    host = ReactBackendHost(BackendHostConfig(api_client=StaticApiClient("unused")))
+    processed: list[tuple[str, str | None]] = []
+
+    async def _emit(event: BackendEvent) -> None:
+        del event
+
+    async def _fake_process_line(line: str, *, transcript_line: str | None = None) -> bool:
+        processed.append((line, transcript_line))
+        return True
+
+    host._emit = _emit  # type: ignore[method-assign]
+    host._process_line = _fake_process_line  # type: ignore[method-assign]
+
+    await host._enqueue_synthetic_followup(
+        "<task-notification>done</task-notification>",
+        transcript_line="<task-notification>",
+    )
+
+    assert host._drain_task is not None
+    await asyncio.wait_for(host._drain_task, timeout=1)
+
+    assert processed == [("<task-notification>done</task-notification>", "<task-notification>")]
+
+
+@pytest.mark.asyncio
 async def test_backend_host_processes_command(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OPENHARNESS_CONFIG_DIR", str(tmp_path / "config"))

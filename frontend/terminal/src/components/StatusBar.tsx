@@ -2,7 +2,7 @@ import React, {useEffect, useState} from 'react';
 import {Box, Text} from 'ink';
 
 import {useTheme} from '../theme/ThemeContext.js';
-import type {TaskSnapshot} from '../types.js';
+import type {SessionQueueSnapshot, TaskSnapshot} from '../types.js';
 
 const SEP = ' \u2502 ';
 
@@ -58,10 +58,12 @@ function StatusBarInner({
 	status,
 	tasks,
 	activeToolName,
+	queue,
 }: {
 	status: Record<string, unknown>;
 	tasks: TaskSnapshot[];
 	activeToolName?: string;
+	queue?: SessionQueueSnapshot;
 }): React.JSX.Element {
 	const {theme} = useTheme();
 	const model = String(status.model ?? 'unknown');
@@ -71,6 +73,8 @@ function StatusBarInner({
 	const inputTokens = Number(status.input_tokens ?? 0);
 	const outputTokens = Number(status.output_tokens ?? 0);
 	const isPlanMode = mode === 'plan' || mode === 'Plan Mode';
+	const queuedCount = queue?.queued.length ?? 0;
+	const activeTurn = queue?.active;
 
 	return (
 		<Box flexDirection="column">
@@ -98,6 +102,14 @@ function StatusBarInner({
 						<>
 							<Text dimColor>{SEP}</Text>
 							<Text dimColor>mcp: {mcpCount}</Text>
+						</>
+					) : null}
+					{activeTurn || queuedCount > 0 ? (
+						<>
+							<Text dimColor>{SEP}</Text>
+							<Text dimColor>
+								queue: {activeTurn ? 'running' : 'idle'}{queuedCount > 0 ? ` +${queuedCount}` : ''}
+							</Text>
 						</>
 					) : null}
 				</Text>

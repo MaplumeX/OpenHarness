@@ -64,12 +64,29 @@ export type SwarmNotificationSnapshot = {
 	timestamp: number;
 };
 
+export type QueueTurnSnapshot = {
+	id: string;
+	kind: string;
+	priority: string;
+	state: 'queued' | 'running' | 'completed' | 'cancelled';
+	label: string;
+	created_at: number;
+	metadata: Record<string, string>;
+};
+
+export type SessionQueueSnapshot = {
+	active?: QueueTurnSnapshot | null;
+	queued: QueueTurnSnapshot[];
+	recent: QueueTurnSnapshot[];
+};
+
 export type BackendEvent = {
 	type: string;
 	message?: string | null;
 	item?: TranscriptItem | null;
 	state?: Record<string, unknown> | null;
 	tasks?: TaskSnapshot[] | null;
+	queue?: SessionQueueSnapshot | null;
 	mcp_servers?: McpServerSnapshot[] | null;
 	bridge_sessions?: BridgeSessionSnapshot[] | null;
 	commands?: string[] | null;

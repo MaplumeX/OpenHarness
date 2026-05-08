@@ -166,11 +166,15 @@ def can_submit_interrupt(self) -> bool: ...
 
 #### 3. Contracts
 
-- `user_cancel`: stop the active turn and preserve unrelated queued turns.
+- `user_cancel`: stop the active turn, insert `[Request interrupted by user]`
+  user message into conversation history, and continue draining remaining queued
+  turns.
 - `submit_interrupt`: only cancel the active tool phase when every running tool
   reports `interrupt_behavior() == "cancel"`; otherwise keep the urgent turn
-  queued.
-- `shutdown`: stop work for teardown; do not try to resume normal drain.
+  queued. Do **not** insert an interrupt user message — the queued turn itself
+  provides context.
+- `shutdown`: stop work for teardown, insert `[Request interrupted by user]`
+  user message, and exit the drain loop immediately.
 - `tool_failure`: internal reason for tool failure cascades.
 - `block` is the default tool behavior and is the safe choice for mutating,
   shell-like, or side-effectful tools.
@@ -183,6 +187,10 @@ def can_submit_interrupt(self) -> bool: ...
 |-----------|-------------------|
 | Interrupt before model/tool output | Raise/catch cancellation normally; no synthetic tool result is needed. |
 | Interrupt after assistant `tool_use` and before matching result | Append one error `ToolResultBlock` for every unresolved tool use before returning control. |
+| `user_cancel` or `shutdown` after CancelledError in `submit_message` | Insert `[Request interrupted by user]` user message at end of `QueryEngine._messages`. |
+| `submit_interrupt` after CancelledError in `submit_message` | Do NOT insert interrupt user message; the queued turn provides context. |
+| `user_cancel` in `_drain_turn_queue` | Continue processing remaining queued turns (do not exit the loop). |
+| `shutdown` in `_drain_turn_queue` | Exit the drain loop immediately. |
 | Submit-interrupt while any running tool is `block` | Do not cancel the active tool phase; leave the queued urgent turn pending. |
 | Submit-interrupt while all running tools are `cancel` | Request interruption, cancel running tool tasks, and continue with provider-safe tool results. |
 | Subprocess tool receives cancellation | Clean up the subprocess first, then let the query layer normalize cancellation into tool results. |
@@ -200,10 +208,14 @@ def can_submit_interrupt(self) -> bool: ...
 
 - Query engine regression: cancellation after assistant `tool_use` produces
   matching error `ToolResultBlock` entries in conversation history.
+- Query engine regression: `user_cancel`/`shutdown` cancellation inserts
+  `[Request interrupted by user]` user message; `submit_interrupt` does not.
 - Parallel tool regression: cancellation or one tool failure cannot leave sibling
   tool uses unresolved.
-- Backend host regression: user cancel preserves queued turns; submit-interrupt
-  cancels only when `QueryEngine.can_submit_interrupt()` is true.
+- Backend host regression: user cancel continues draining remaining queued turns;
+  shutdown exits the drain loop.
+- Backend host regression: submit-interrupt cancels only when
+  `QueryEngine.can_submit_interrupt()` is true.
 - Tool regression: at least one `cancel` tool and one default `block` tool cover
   the policy matrix.
 

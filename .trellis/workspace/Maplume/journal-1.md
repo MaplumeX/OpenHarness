@@ -104,3 +104,36 @@ Implemented a Claude Code-like session turn queue for the React terminal runtime
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: Robust interrupt handling and message queue integration
+
+**Date**: 2026-05-08
+**Task**: Robust interrupt handling and message queue integration
+**Branch**: `main`
+
+### Summary
+
+Implemented interrupt-safe turn handling with typed interrupt reasons, provider-safe synthetic tool results, tool interrupt policy, submit-interrupt queue behavior, modal cleanup, tests, and backend spec updates.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `cf983c8` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

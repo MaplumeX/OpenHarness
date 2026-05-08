@@ -223,7 +223,49 @@ async def test_backend_host_queues_turns_while_active_and_drains_fifo():
 
 
 @pytest.mark.asyncio
-async def test_backend_host_interrupt_cancels_active_turn_and_leaves_queue():
+async def test_backend_host_user_cancel_continues_draining_remaining_turns():
+    """After user_cancel, the drain loop continues processing remaining queued turns."""
+    host = ReactBackendHost(BackendHostConfig(api_client=StaticApiClient("unused")))
+    events: list[BackendEvent] = []
+    first_started = asyncio.Event()
+    processed: list[str] = []
+
+    async def _emit(event: BackendEvent) -> None:
+        events.append(event)
+
+    async def _fake_process_line(line: str, *, transcript_line: str | None = None) -> bool:
+        processed.append(transcript_line or line)
+        if line == "first":
+            first_started.set()
+            await asyncio.Event().wait()
+        return True
+
+    host._emit = _emit  # type: ignore[method-assign]
+    host._status_snapshot = lambda: BackendEvent(type="state_snapshot", state={})  # type: ignore[method-assign]
+    host._process_line = _fake_process_line  # type: ignore[method-assign]
+
+    await host._enqueue_submit_line("first")
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    await host._enqueue_submit_line("second")
+    await host._interrupt_active_request()
+
+    assert host._drain_task is not None
+    await asyncio.wait_for(host._drain_task, timeout=1)
+
+    snapshot = host._queue_snapshot()
+    assert snapshot.active is None
+    assert snapshot.queued == []
+    assert processed == ["first", "second"]
+    assert [(turn.label, turn.state) for turn in snapshot.recent] == [
+        ("first", "cancelled"),
+        ("second", "completed"),
+    ]
+    assert any(event.type == "line_complete" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_backend_host_shutdown_interrupt_exits_drain_loop():
+    """After shutdown interrupt, the drain loop should exit immediately."""
     host = ReactBackendHost(BackendHostConfig(api_client=StaticApiClient("unused")))
     events: list[BackendEvent] = []
     first_started = asyncio.Event()
@@ -245,7 +287,7 @@ async def test_backend_host_interrupt_cancels_active_turn_and_leaves_queue():
     await host._enqueue_submit_line("first")
     await asyncio.wait_for(first_started.wait(), timeout=1)
     await host._enqueue_submit_line("second")
-    await host._interrupt_active_request()
+    await host._interrupt_active_request("shutdown")
 
     assert host._drain_task is not None
     await asyncio.wait_for(host._drain_task, timeout=1)
@@ -254,7 +296,7 @@ async def test_backend_host_interrupt_cancels_active_turn_and_leaves_queue():
     assert snapshot.active is None
     assert [turn.label for turn in snapshot.queued] == ["second"]
     assert [(turn.label, turn.state) for turn in snapshot.recent] == [("first", "cancelled")]
-    assert any(event.type == "line_complete" for event in events)
+    assert snapshot.recent[0].metadata.get("cancel_reason") == "shutdown"
 
 
 @pytest.mark.asyncio

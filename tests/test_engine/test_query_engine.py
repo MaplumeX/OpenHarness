@@ -1295,6 +1295,152 @@ async def test_query_engine_synthesizes_tool_result_when_tool_cancelled(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_query_engine_inserts_interrupt_user_message_on_user_cancel(tmp_path: Path):
+    registry = ToolRegistry()
+    registry.register(_SlowCancellableTool())
+
+    engine = QueryEngine(
+        api_client=FakeApiClient(
+            [
+                _FakeResponse(
+                    message=ConversationMessage(
+                        role="assistant",
+                        content=[
+                            TextBlock(text="Starting slow tool."),
+                            ToolUseBlock(id="toolu_slow", name="slow_cancel", input={}),
+                        ],
+                    ),
+                    usage=UsageSnapshot(input_tokens=1, output_tokens=1),
+                ),
+            ]
+        ),
+        tool_registry=registry,
+        permission_checker=PermissionChecker(PermissionSettings(mode=PermissionMode.FULL_AUTO)),
+        cwd=tmp_path,
+        model="claude-test",
+        system_prompt="system",
+    )
+
+    events = []
+    tool_started = asyncio.Event()
+
+    async def _collect_events() -> None:
+        async for event in engine.submit_message("run slow tool"):
+            events.append(event)
+            if isinstance(event, ToolExecutionStarted):
+                tool_started.set()
+
+    task = asyncio.create_task(_collect_events())
+    await asyncio.wait_for(tool_started.wait(), timeout=1)
+
+    engine.request_interrupt("user_cancel")
+    task.cancel("user_cancel")
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    last_msg = engine.messages[-1]
+    assert last_msg.role == "user"
+    assert last_msg.text == "[Request interrupted by user]"
+
+
+@pytest.mark.asyncio
+async def test_query_engine_inserts_interrupt_user_message_on_shutdown(tmp_path: Path):
+    registry = ToolRegistry()
+    registry.register(_SlowCancellableTool())
+
+    engine = QueryEngine(
+        api_client=FakeApiClient(
+            [
+                _FakeResponse(
+                    message=ConversationMessage(
+                        role="assistant",
+                        content=[
+                            TextBlock(text="Starting slow tool."),
+                            ToolUseBlock(id="toolu_slow", name="slow_cancel", input={}),
+                        ],
+                    ),
+                    usage=UsageSnapshot(input_tokens=1, output_tokens=1),
+                ),
+            ]
+        ),
+        tool_registry=registry,
+        permission_checker=PermissionChecker(PermissionSettings(mode=PermissionMode.FULL_AUTO)),
+        cwd=tmp_path,
+        model="claude-test",
+        system_prompt="system",
+    )
+
+    events = []
+    tool_started = asyncio.Event()
+
+    async def _collect_events() -> None:
+        async for event in engine.submit_message("run slow tool"):
+            events.append(event)
+            if isinstance(event, ToolExecutionStarted):
+                tool_started.set()
+
+    task = asyncio.create_task(_collect_events())
+    await asyncio.wait_for(tool_started.wait(), timeout=1)
+
+    engine.request_interrupt("shutdown")
+    task.cancel("shutdown")
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    last_msg = engine.messages[-1]
+    assert last_msg.role == "user"
+    assert last_msg.text == "[Request interrupted by user]"
+
+
+@pytest.mark.asyncio
+async def test_query_engine_skips_interrupt_message_on_submit_interrupt(tmp_path: Path):
+    registry = ToolRegistry()
+    registry.register(_SlowCancellableTool())
+
+    engine = QueryEngine(
+        api_client=FakeApiClient(
+            [
+                _FakeResponse(
+                    message=ConversationMessage(
+                        role="assistant",
+                        content=[
+                            TextBlock(text="Starting slow tool."),
+                            ToolUseBlock(id="toolu_slow", name="slow_cancel", input={}),
+                        ],
+                    ),
+                    usage=UsageSnapshot(input_tokens=1, output_tokens=1),
+                ),
+            ]
+        ),
+        tool_registry=registry,
+        permission_checker=PermissionChecker(PermissionSettings(mode=PermissionMode.FULL_AUTO)),
+        cwd=tmp_path,
+        model="claude-test",
+        system_prompt="system",
+    )
+
+    events = []
+    tool_started = asyncio.Event()
+
+    async def _collect_events() -> None:
+        async for event in engine.submit_message("run slow tool"):
+            events.append(event)
+            if isinstance(event, ToolExecutionStarted):
+                tool_started.set()
+
+    task = asyncio.create_task(_collect_events())
+    await asyncio.wait_for(tool_started.wait(), timeout=1)
+
+    engine.request_interrupt("submit_interrupt")
+    task.cancel("submit_interrupt")
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    for msg in engine.messages:
+        assert msg.text != "[Request interrupted by user]"
+
+
+@pytest.mark.asyncio
 async def test_query_engine_synthesizes_tool_result_when_parallel_tool_raises(tmp_path: Path):
     """Parallel tool calls must each yield a tool_result even when one tool raises.
 

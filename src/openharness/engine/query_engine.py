@@ -203,6 +203,11 @@ class QueryEngine:
                 yield event
         except asyncio.CancelledError:
             self._messages = list(query_messages)
+            reason = self._interrupt_state.reason or "user_cancel"
+            if reason != "submit_interrupt":
+                self._messages.append(
+                    ConversationMessage.from_user_text("[Request interrupted by user]")
+                )
             raise
         finally:
             self._interrupt_state.clear()

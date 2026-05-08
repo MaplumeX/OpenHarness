@@ -319,7 +319,7 @@ class ReactBackendHost:
             self._active_turn = None
             self._busy = False
             await self._emit_queue_snapshot()
-            if was_cancelled and cancelled_reason != "submit_interrupt":
+            if was_cancelled and cancelled_reason == "shutdown":
                 return
             if not should_continue:
                 await self._shutdown()

@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 2
-- **Last Active**: 2026-05-06
+- **Total Sessions**: 3
+- **Last Active**: 2026-05-08
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~73 | Active |
+| `journal-1.md` | ~106 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 3 | 2026-05-08 | Session turn queue for React terminal | `d0c1c8c` | `main` |
 | 2 | 2026-05-06 | oh setup 支持自定义提供商 | `746f670` | `main` |
 | 1 | 2026-05-06 | Bootstrap: fill backend spec guidelines | `42b564c` | `main` |
 <!-- @@@/auto:session-history -->

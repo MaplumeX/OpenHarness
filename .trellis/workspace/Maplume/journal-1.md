@@ -71,3 +71,36 @@ Scanned codebase structure, error handling, logging, and quality patterns. Fille
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: Session turn queue for React terminal
+
+**Date**: 2026-05-08
+**Task**: Session turn queue for React terminal
+**Branch**: `main`
+
+### Summary
+
+Implemented a Claude Code-like session turn queue for the React terminal runtime, including backend queue draining, queue_snapshot protocol events, frontend status display, tests, and backend spec updates.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d0c1c8c` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

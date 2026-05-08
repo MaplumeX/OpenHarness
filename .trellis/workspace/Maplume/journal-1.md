@@ -137,3 +137,37 @@ Implemented interrupt-safe turn handling with typed interrupt reasons, provider-
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: Interrupt message insertion & queue drain continuation
+
+**Date**: 2026-05-08
+**Task**: Interrupt message insertion & queue drain continuation
+**Branch**: `main`
+
+### Summary
+
+Aligned OpenHarness interrupt behavior with Claude Code: (1) insert [Request interrupted by user] user message into conversation history on user_cancel/shutdown (skip on submit_interrupt); (2) continue draining remaining queued turns after user_cancel instead of exiting the drain loop (still exit on shutdown). Added 5 tests, updated error-handling spec.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d8f6b2e` | (see git log) |
+| `ee63aa7` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

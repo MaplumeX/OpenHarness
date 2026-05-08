@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend stack overview and pre-development guide entry point for Python async/runtime work."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Interruption must convert engine/tool failures into provider-safe stream events or tool results."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Implementation touches async code and requires pytest/ruff/mypy-aligned tests."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Cancellation and queue behavior should use project logging conventions."}
+{"file": ".trellis/tasks/05-08-interrupt-message-queue/research/claude-code-interrupt-queue.md", "reason": "Reference design for typed interrupts, queue draining, tool interrupt policy, and synthetic tool results."}
+{"file": ".trellis/tasks/05-08-interrupt-message-queue/research/openharness-current-gaps.md", "reason": "Current OpenHarness behavior, gaps, likely impacted areas, and test points."}

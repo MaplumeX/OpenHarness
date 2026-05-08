@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend stack overview for final spec compliance review."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Check interrupted query/tool paths produce safe errors or tool results instead of leaking exceptions."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Check lint, type-check, and async test expectations."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Check any new logging follows project conventions."}
+{"file": ".trellis/tasks/05-08-interrupt-message-queue/research/claude-code-interrupt-queue.md", "reason": "Review implementation against the selected Claude Code-style MVP design."}
+{"file": ".trellis/tasks/05-08-interrupt-message-queue/research/openharness-current-gaps.md", "reason": "Review that known current gaps and test points were addressed or intentionally deferred."}

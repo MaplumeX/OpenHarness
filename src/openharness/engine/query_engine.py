@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import AsyncIterator
 
 from openharness.api.client import SupportsStreamingMessages
+from openharness.api.usage import UsageSnapshot
 from openharness.engine.cost_tracker import CostTracker
 from openharness.coordinator.coordinator_mode import get_coordinator_user_context
 from openharness.engine.messages import ConversationMessage, TextBlock, ToolResultBlock
@@ -13,7 +15,7 @@ from openharness.engine.query import AskUserPrompt, PermissionPrompt, QueryConte
 from openharness.engine.stream_events import AssistantTurnComplete, StreamEvent
 from openharness.hooks import HookEvent, HookExecutor
 from openharness.permissions.checker import PermissionChecker
-from openharness.tools.base import ToolRegistry
+from openharness.tools.base import InterruptReason, InterruptState, ToolRegistry
 
 
 class QueryEngine:
@@ -53,6 +55,7 @@ class QueryEngine:
         self._tool_metadata = tool_metadata or {}
         self._messages: list[ConversationMessage] = []
         self._cost_tracker = CostTracker()
+        self._interrupt_state = InterruptState()
 
     @property
     def messages(self) -> list[ConversationMessage]:
@@ -85,7 +88,7 @@ class QueryEngine:
         return self._tool_metadata
 
     @property
-    def total_usage(self):
+    def total_usage(self) -> UsageSnapshot:
         """Return the total usage across all turns."""
         return self._cost_tracker.total
 
@@ -93,6 +96,14 @@ class QueryEngine:
         """Clear the in-memory conversation history."""
         self._messages.clear()
         self._cost_tracker = CostTracker()
+
+    def request_interrupt(self, reason: InterruptReason) -> None:
+        """Request cancellation of the active query with a typed reason."""
+        self._interrupt_state.request(reason)
+
+    def can_submit_interrupt(self) -> bool:
+        """Return whether an urgent queued turn may cancel the active query."""
+        return self._interrupt_state.all_running_tools_interruptible()
 
     def set_system_prompt(self, prompt: str) -> None:
         """Update the active system prompt for future turns."""
@@ -177,17 +188,24 @@ class QueryEngine:
             ask_user_prompt=self._ask_user_prompt,
             hook_executor=self._hook_executor,
             tool_metadata=self._tool_metadata,
+            interrupt_state=self._interrupt_state,
         )
         query_messages = list(self._messages)
         coordinator_context = self._build_coordinator_context_message()
         if coordinator_context is not None:
             query_messages.append(coordinator_context)
-        async for event, usage in run_query(context, query_messages):
-            if isinstance(event, AssistantTurnComplete):
-                self._messages = list(query_messages)
-            if usage is not None:
-                self._cost_tracker.add(usage)
-            yield event
+        try:
+            async for event, usage in run_query(context, query_messages):
+                if isinstance(event, AssistantTurnComplete):
+                    self._messages = list(query_messages)
+                if usage is not None:
+                    self._cost_tracker.add(usage)
+                yield event
+        except asyncio.CancelledError:
+            self._messages = list(query_messages)
+            raise
+        finally:
+            self._interrupt_state.clear()
 
     async def continue_pending(self, *, max_turns: int | None = None) -> AsyncIterator[StreamEvent]:
         """Continue an interrupted tool loop without appending a new user message."""
@@ -206,8 +224,14 @@ class QueryEngine:
             ask_user_prompt=self._ask_user_prompt,
             hook_executor=self._hook_executor,
             tool_metadata=self._tool_metadata,
+            interrupt_state=self._interrupt_state,
         )
-        async for event, usage in run_query(context, self._messages):
-            if usage is not None:
-                self._cost_tracker.add(usage)
-            yield event
+        try:
+            async for event, usage in run_query(context, self._messages):
+                if usage is not None:
+                    self._cost_tracker.add(usage)
+                yield event
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._interrupt_state.clear()

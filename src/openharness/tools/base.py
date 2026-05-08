@@ -3,15 +3,58 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
     from openharness.hooks.executor import HookExecutor
+
+InterruptReason = Literal["user_cancel", "submit_interrupt", "shutdown", "tool_failure"]
+ToolInterruptBehavior = Literal["cancel", "block"]
+
+
+@dataclass
+class InterruptState:
+    """Shared cancellation state for one active query."""
+
+    reason: InterruptReason | None = None
+    running_tool_behaviors: set[ToolInterruptBehavior] = field(default_factory=set)
+
+    @property
+    def requested(self) -> bool:
+        """Return whether cancellation has been requested."""
+        return self.reason is not None
+
+    def request(self, reason: InterruptReason) -> None:
+        """Mark the query as interrupted with a typed reason."""
+        self.reason = reason
+
+    def clear(self) -> None:
+        """Reset interruption and active tool policy state."""
+        self.reason = None
+        self.running_tool_behaviors.clear()
+
+    def set_running_tool_behaviors(self, behaviors: set[ToolInterruptBehavior]) -> None:
+        """Record the interrupt policy of currently executing tools."""
+        self.running_tool_behaviors = set(behaviors)
+
+    def clear_running_tool_behaviors(self) -> None:
+        """Clear active tool policy state."""
+        self.running_tool_behaviors.clear()
+
+    def all_running_tools_interruptible(self) -> bool:
+        """Return True when submit-interrupt may cancel the current tool phase."""
+        return "block" not in self.running_tool_behaviors
+
+    def raise_if_requested(self) -> None:
+        """Cooperative cancellation checkpoint for tools and query orchestration."""
+        if self.reason is not None:
+            raise asyncio.CancelledError(self.reason)
 
 
 @dataclass
@@ -21,6 +64,7 @@ class ToolExecutionContext:
     cwd: Path
     metadata: dict[str, Any] = field(default_factory=dict)
     hook_executor: HookExecutor | None = None
+    interrupt_state: InterruptState = field(default_factory=InterruptState)
 
 
 @dataclass(frozen=True)
@@ -47,6 +91,10 @@ class BaseTool(ABC):
         """Return whether the invocation is read-only."""
         del arguments
         return False
+
+    def interrupt_behavior(self) -> ToolInterruptBehavior:
+        """Return whether submit-interrupt may cancel this tool."""
+        return "block"
 
     def to_api_schema(self) -> dict[str, Any]:
         """Return the tool schema expected by the Anthropic Messages API."""

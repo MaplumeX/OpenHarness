@@ -114,7 +114,117 @@ for tc, result in zip(tool_calls, raw_results):
         )
 ```
 
-### 4. Graceful Degradation (Keyring Fallback)
+### 4. Interruption-to-Tool-Result Conversion
+
+#### 1. Scope / Trigger
+
+Interactive query cancellation crosses the UI backend, `QueryEngine`, the query
+loop, and tool implementations. It must be represented as typed interrupt state,
+not only raw task cancellation, because provider APIs reject an assistant
+`tool_use` that is not followed by a matching user `tool_result`.
+
+#### 2. Signatures
+
+```python
+# src/openharness/tools/base.py
+InterruptReason = Literal["user_cancel", "submit_interrupt", "shutdown", "tool_failure"]
+ToolInterruptBehavior = Literal["cancel", "block"]
+
+@dataclass
+class InterruptState:
+    reason: InterruptReason | None = None
+    running_tool_behaviors: set[ToolInterruptBehavior] = field(default_factory=set)
+
+    def request(self, reason: InterruptReason) -> None: ...
+    def clear(self) -> None: ...
+    def set_running_tool_behaviors(self, behaviors: set[ToolInterruptBehavior]) -> None: ...
+    def clear_running_tool_behaviors(self) -> None: ...
+    def all_running_tools_interruptible(self) -> bool: ...
+    def raise_if_requested(self) -> None: ...
+
+@dataclass
+class ToolExecutionContext:
+    interrupt_state: InterruptState = field(default_factory=InterruptState)
+
+class BaseTool(ABC):
+    def interrupt_behavior(self) -> ToolInterruptBehavior:
+        return "block"
+```
+
+```python
+# src/openharness/engine/query.py
+@dataclass
+class QueryContext:
+    interrupt_state: InterruptState = field(default_factory=InterruptState)
+```
+
+```python
+# src/openharness/engine/query_engine.py
+def request_interrupt(self, reason: InterruptReason) -> None: ...
+def can_submit_interrupt(self) -> bool: ...
+```
+
+#### 3. Contracts
+
+- `user_cancel`: stop the active turn and preserve unrelated queued turns.
+- `submit_interrupt`: only cancel the active tool phase when every running tool
+  reports `interrupt_behavior() == "cancel"`; otherwise keep the urgent turn
+  queued.
+- `shutdown`: stop work for teardown; do not try to resume normal drain.
+- `tool_failure`: internal reason for tool failure cascades.
+- `block` is the default tool behavior and is the safe choice for mutating,
+  shell-like, or side-effectful tools.
+- `cancel` is opt-in for tools whose cleanup is safe and whose partial work will
+  not corrupt state.
+
+#### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|-----------|-------------------|
+| Interrupt before model/tool output | Raise/catch cancellation normally; no synthetic tool result is needed. |
+| Interrupt after assistant `tool_use` and before matching result | Append one error `ToolResultBlock` for every unresolved tool use before returning control. |
+| Submit-interrupt while any running tool is `block` | Do not cancel the active tool phase; leave the queued urgent turn pending. |
+| Submit-interrupt while all running tools are `cancel` | Request interruption, cancel running tool tasks, and continue with provider-safe tool results. |
+| Subprocess tool receives cancellation | Clean up the subprocess first, then let the query layer normalize cancellation into tool results. |
+
+#### 5. Good/Base/Bad Cases
+
+- Good: `sleep` checks `context.interrupt_state.raise_if_requested()` around
+  blocking work and declares `interrupt_behavior() == "cancel"`.
+- Base: a tool does not override `interrupt_behavior()`, so submit-interrupt is
+  blocked while it runs.
+- Bad: a tool swallows `asyncio.CancelledError` and returns a successful
+  `ToolResult`, hiding that the user interrupted the turn.
+
+#### 6. Tests Required
+
+- Query engine regression: cancellation after assistant `tool_use` produces
+  matching error `ToolResultBlock` entries in conversation history.
+- Parallel tool regression: cancellation or one tool failure cannot leave sibling
+  tool uses unresolved.
+- Backend host regression: user cancel preserves queued turns; submit-interrupt
+  cancels only when `QueryEngine.can_submit_interrupt()` is true.
+- Tool regression: at least one `cancel` tool and one default `block` tool cover
+  the policy matrix.
+
+#### 7. Wrong vs Correct
+
+Wrong:
+
+```python
+# Cancels the task after assistant tool_use, leaving history malformed.
+task.cancel()
+```
+
+Correct:
+
+```python
+engine.request_interrupt("submit_interrupt")
+task.cancel("submit_interrupt")
+# query layer appends interrupted ToolResultBlock entries for unresolved tools
+```
+
+### 5. Graceful Degradation (Keyring Fallback)
 
 ```python
 # src/openharness/auth/storage.py:130-138
@@ -128,7 +238,7 @@ if use_keyring:
 # ... fall back to file-based storage
 ```
 
-### 5. Best-Effort Operations with `contextlib.suppress`
+### 6. Best-Effort Operations with `contextlib.suppress`
 
 ```python
 # For operations where failure is acceptable

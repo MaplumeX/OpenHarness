@@ -258,6 +258,134 @@ async def test_backend_host_interrupt_cancels_active_turn_and_leaves_queue():
 
 
 @pytest.mark.asyncio
+async def test_backend_host_now_turn_submit_interrupts_active_turn_and_drains_next():
+    host = ReactBackendHost(BackendHostConfig(api_client=StaticApiClient("unused")))
+    events: list[BackendEvent] = []
+    first_started = asyncio.Event()
+    processed: list[str] = []
+
+    async def _emit(event: BackendEvent) -> None:
+        events.append(event)
+
+    async def _fake_process_line(line: str, *, transcript_line: str | None = None) -> bool:
+        del transcript_line
+        processed.append(line)
+        if line == "first":
+            first_started.set()
+            await asyncio.Event().wait()
+        return True
+
+    host._emit = _emit  # type: ignore[method-assign]
+    host._status_snapshot = lambda: BackendEvent(type="state_snapshot", state={})  # type: ignore[method-assign]
+    host._process_line = _fake_process_line  # type: ignore[method-assign]
+
+    await host._enqueue_submit_line("first")
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    await host._enqueue_submit_line("urgent", priority="now")
+
+    assert host._drain_task is not None
+    await asyncio.wait_for(host._drain_task, timeout=1)
+
+    snapshot = host._queue_snapshot()
+    assert snapshot.active is None
+    assert snapshot.queued == []
+    assert processed == ["first", "urgent"]
+    assert [(turn.label, turn.state) for turn in snapshot.recent] == [
+        ("first", "cancelled"),
+        ("urgent", "completed"),
+    ]
+    assert snapshot.recent[0].metadata["cancel_reason"] == "submit_interrupt"
+    assert not any(
+        event.type == "transcript_item"
+        and event.item
+        and event.item.role == "system"
+        and "Interrupted by user" in event.item.text
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_backend_host_now_turn_waits_when_active_tool_blocks_submit_interrupt():
+    host = ReactBackendHost(BackendHostConfig(api_client=StaticApiClient("unused")))
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    processed: list[str] = []
+    requested_interrupts: list[str] = []
+
+    class _BlockingEngine:
+        def can_submit_interrupt(self) -> bool:
+            return False
+
+        def request_interrupt(self, reason: str) -> None:
+            requested_interrupts.append(reason)
+
+    class _Bundle:
+        engine = _BlockingEngine()
+
+    async def _emit(event: BackendEvent) -> None:
+        del event
+
+    async def _fake_process_line(line: str, *, transcript_line: str | None = None) -> bool:
+        del transcript_line
+        processed.append(line)
+        if line == "first":
+            first_started.set()
+            await release_first.wait()
+        return True
+
+    host._bundle = _Bundle()  # type: ignore[assignment]
+    host._emit = _emit  # type: ignore[method-assign]
+    host._process_line = _fake_process_line  # type: ignore[method-assign]
+
+    await host._enqueue_submit_line("first")
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    await host._enqueue_submit_line("urgent", priority="now")
+
+    snapshot = host._queue_snapshot()
+    assert snapshot.active is not None
+    assert snapshot.active.label == "first"
+    assert [turn.label for turn in snapshot.queued] == ["urgent"]
+    assert requested_interrupts == []
+
+    release_first.set()
+    assert host._drain_task is not None
+    await asyncio.wait_for(host._drain_task, timeout=1)
+
+    assert processed == ["first", "urgent"]
+    assert [(turn.label, turn.state) for turn in host._queue_snapshot().recent] == [
+        ("first", "completed"),
+        ("urgent", "completed"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_backend_host_interrupt_clears_active_question_modal():
+    host = ReactBackendHost(BackendHostConfig(api_client=StaticApiClient("unused")))
+    events: list[BackendEvent] = []
+    modal_opened = asyncio.Event()
+
+    async def _emit(event: BackendEvent) -> None:
+        events.append(event)
+        if event.type == "modal_request" and event.modal is not None:
+            modal_opened.set()
+
+    async def _await_question() -> bool:
+        await host._ask_question("Proceed?")
+        return True
+
+    host._emit = _emit  # type: ignore[method-assign]
+    host._status_snapshot = lambda: BackendEvent(type="state_snapshot", state={})  # type: ignore[method-assign]
+
+    task = asyncio.create_task(host._run_active_request(_await_question()))
+    await asyncio.wait_for(modal_opened.wait(), timeout=1)
+
+    await host._interrupt_active_request("user_cancel")
+
+    assert await asyncio.wait_for(task, timeout=1) is True
+    assert any(event.type == "modal_request" and event.modal is None for event in events)
+
+
+@pytest.mark.asyncio
 async def test_backend_host_synthetic_followup_uses_process_line():
     host = ReactBackendHost(BackendHostConfig(api_client=StaticApiClient("unused")))
     processed: list[tuple[str, str | None]] = []

@@ -6,9 +6,9 @@ import asyncio
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, cast
 from uuid import uuid4
 
 from openharness.api.client import (
@@ -23,9 +23,11 @@ from openharness.api.usage import UsageSnapshot
 from openharness.config.paths import get_data_dir
 from openharness.engine.messages import (
     ConversationMessage,
+    ContentBlock,
     ImageBlock,
     TextBlock,
     ToolResultBlock,
+    ToolUseBlock,
 )
 from openharness.engine.stream_events import (
     AssistantTextDelta,
@@ -40,7 +42,12 @@ from openharness.engine.stream_events import (
 from openharness.hooks import HookEvent, HookExecutor
 from openharness.permissions.checker import PermissionChecker
 from openharness.services.tool_outputs import tool_output_inline_chars, tool_output_preview_chars
-from openharness.tools.base import ToolExecutionContext
+from openharness.tools.base import (
+    InterruptReason,
+    InterruptState,
+    ToolExecutionContext,
+    ToolInterruptBehavior,
+)
 from openharness.tools.base import ToolRegistry
 
 AUTO_COMPACT_STATUS_MESSAGE = "Auto-compacting conversation memory to keep things fast and focused."
@@ -152,6 +159,7 @@ class QueryContext:
     max_turns: int | None = 200
     hook_executor: HookExecutor | None = None
     tool_metadata: dict[str, object] | None = None
+    interrupt_state: InterruptState = field(default_factory=InterruptState)
 
 
 def _append_capped_unique(bucket: list[Any], value: Any, *, limit: int) -> None:
@@ -182,7 +190,7 @@ def _task_focus_state(tool_metadata: dict[str, object] | None) -> dict[str, obje
         value.setdefault("verified_state", [])
         value.setdefault("next_step", "")
         return value
-    replacement = {
+    replacement: dict[str, object] = {
         "goal": "",
         "recent_goals": [],
         "active_artifacts": [],
@@ -406,8 +414,10 @@ def _record_tool_carryover(
     if resolved_file_path is not None:
         _remember_active_artifact(context.tool_metadata, resolved_file_path)
     if tool_name == "read_file" and resolved_file_path is not None:
-        offset = int(tool_input.get("offset") or 0)
-        limit = int(tool_input.get("limit") or 200)
+        offset_value = tool_input.get("offset") or 0
+        limit_value = tool_input.get("limit") or 200
+        offset = int(offset_value) if isinstance(offset_value, (int, float, str)) else 0
+        limit = int(limit_value) if isinstance(limit_value, (int, float, str)) else 200
         _remember_read_file(
             context.tool_metadata,
             path=resolved_file_path,
@@ -571,7 +581,7 @@ async def _preprocess_images_in_messages(
     if is_model_multimodal(context.model):
         return
 
-    vision_config = context.tool_metadata.get("vision_model_config")
+    vision_config = (context.tool_metadata or {}).get("vision_model_config")
     if not vision_config:
         # No vision model configured — skip preprocessing.
         return
@@ -629,6 +639,39 @@ async def _preprocess_images_in_messages(
         msg.content[blk_idx] = TextBlock(text=description)
 
 
+def _cancelled_error_reason(
+    exc: asyncio.CancelledError,
+    interrupt_state: InterruptState,
+) -> InterruptReason:
+    if interrupt_state.reason is not None:
+        return interrupt_state.reason
+    if exc.args:
+        raw_reason = exc.args[0]
+        if raw_reason in {"user_cancel", "submit_interrupt", "shutdown", "tool_failure"}:
+            return cast(InterruptReason, raw_reason)
+    return "user_cancel"
+
+
+def _interrupted_tool_result(tool_use_id: str, reason: InterruptReason) -> ToolResultBlock:
+    label = reason.replace("_", " ")
+    return ToolResultBlock(
+        tool_use_id=tool_use_id,
+        content=f"Tool execution interrupted: {label}.",
+        is_error=True,
+    )
+
+
+def _tool_interrupt_behaviors(
+    context: QueryContext,
+    tool_calls: list[ToolUseBlock],
+) -> set[ToolInterruptBehavior]:
+    behaviors: set[ToolInterruptBehavior] = set()
+    for tool_call in tool_calls:
+        tool = context.tool_registry.get(tool_call.name)
+        behaviors.add(tool.interrupt_behavior() if tool is not None else "block")
+    return behaviors
+
+
 async def run_query(
     context: QueryContext,
     messages: list[ConversationMessage],
@@ -657,7 +700,7 @@ async def run_query(
 
     async def _stream_compaction(
         *,
-        trigger: str,
+        trigger: Literal["auto", "manual", "reactive"],
         force: bool = False,
     ) -> AsyncIterator[tuple[StreamEvent, UsageSnapshot | None]]:
         nonlocal last_compaction_result
@@ -722,7 +765,7 @@ async def run_query(
         usage = UsageSnapshot()
 
         try:
-            async for event in context.api_client.stream_message(
+            async for api_event in context.api_client.stream_message(
                 ApiMessageRequest(
                     model=context.model,
                     messages=messages,
@@ -731,21 +774,22 @@ async def run_query(
                     tools=context.tool_registry.to_api_schema(),
                 )
             ):
-                if isinstance(event, ApiTextDeltaEvent):
-                    yield AssistantTextDelta(text=event.text), None
+                if isinstance(api_event, ApiTextDeltaEvent):
+                    yield AssistantTextDelta(text=api_event.text), None
                     continue
-                if isinstance(event, ApiRetryEvent):
+                if isinstance(api_event, ApiRetryEvent):
                     yield StatusEvent(
                         message=(
-                            f"Request failed; retrying in {event.delay_seconds:.1f}s "
-                            f"(attempt {event.attempt + 1} of {event.max_attempts}): {event.message}"
+                            f"Request failed; retrying in {api_event.delay_seconds:.1f}s "
+                            f"(attempt {api_event.attempt + 1} of {api_event.max_attempts}): "
+                            f"{api_event.message}"
                         )
                     ), None
                     continue
 
-                if isinstance(event, ApiMessageCompleteEvent):
-                    final_message = event.message
-                    usage = event.usage
+                if isinstance(api_event, ApiMessageCompleteEvent):
+                    final_message = api_event.message
+                    usage = api_event.usage
         except Exception as exc:
             error_msg = str(exc)
             if _is_completion_token_limit_error(exc):
@@ -811,57 +855,94 @@ async def run_query(
             return
 
         tool_calls = final_message.tool_uses
+        context.interrupt_state.set_running_tool_behaviors(
+            _tool_interrupt_behaviors(context, tool_calls)
+        )
 
-        if len(tool_calls) == 1:
-            # Single tool: sequential (stream events immediately)
-            tc = tool_calls[0]
-            yield ToolExecutionStarted(tool_name=tc.name, tool_input=tc.input), None
-            result = await _execute_tool_call(context, tc.name, tc.id, tc.input)
-            yield ToolExecutionCompleted(
-                tool_name=tc.name,
-                output=result.content,
-                is_error=result.is_error,
-            ), None
-            tool_results = [result]
-        else:
-            # Multiple tools: execute concurrently, emit events after
-            for tc in tool_calls:
+        try:
+            tool_results: list[ToolResultBlock]
+            if len(tool_calls) == 1:
+                # Single tool: sequential (stream events immediately)
+                tc = tool_calls[0]
                 yield ToolExecutionStarted(tool_name=tc.name, tool_input=tc.input), None
-
-            async def _run(tc):
-                return await _execute_tool_call(context, tc.name, tc.id, tc.input)
-
-            # Use return_exceptions=True so a single failing tool does not abandon
-            # its siblings as cancelled coroutines and leave the conversation with
-            # un-replied tool_use blocks (Anthropic's API rejects the next request
-            # on the session if any tool_use is missing a matching tool_result).
-            raw_results = await asyncio.gather(
-                *[_run(tc) for tc in tool_calls], return_exceptions=True
-            )
-            tool_results = []
-            for tc, result in zip(tool_calls, raw_results):
-                if isinstance(result, BaseException):
-                    log.exception(
-                        "tool execution raised: name=%s id=%s",
-                        tc.name,
-                        tc.id,
-                        exc_info=result,
-                    )
-                    result = ToolResultBlock(
-                        tool_use_id=tc.id,
-                        content=f"Tool {tc.name} failed: {type(result).__name__}: {result}",
+                try:
+                    result = await _execute_tool_call(context, tc.name, tc.id, tc.input)
+                except asyncio.CancelledError as exc:
+                    reason = _cancelled_error_reason(exc, context.interrupt_state)
+                    result = _interrupted_tool_result(tc.id, reason)
+                    interrupted_content: list[ContentBlock] = [result]
+                    messages.append(ConversationMessage(role="user", content=interrupted_content))
+                    yield ToolExecutionCompleted(
+                        tool_name=tc.name,
+                        output=result.content,
                         is_error=True,
-                    )
-                tool_results.append(result)
-
-            for tc, result in zip(tool_calls, tool_results):
+                    ), None
+                    raise
                 yield ToolExecutionCompleted(
                     tool_name=tc.name,
                     output=result.content,
                     is_error=result.is_error,
                 ), None
+                tool_results = [result]
+            else:
+                # Multiple tools: execute concurrently, emit events after
+                for tc in tool_calls:
+                    yield ToolExecutionStarted(tool_name=tc.name, tool_input=tc.input), None
 
-        messages.append(ConversationMessage(role="user", content=tool_results))
+                async def _run(tc: ToolUseBlock) -> ToolResultBlock:
+                    return await _execute_tool_call(context, tc.name, tc.id, tc.input)
+
+                tasks = [asyncio.create_task(_run(tc)) for tc in tool_calls]
+                try:
+                    # Use return_exceptions=True so a single failing tool does not abandon
+                    # its siblings as cancelled coroutines and leave the conversation with
+                    # un-replied tool_use blocks (Anthropic's API rejects the next request
+                    # on the session if any tool_use is missing a matching tool_result).
+                    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+                    cancelled_exc: asyncio.CancelledError | None = None
+                except asyncio.CancelledError as exc:
+                    cancelled_exc = exc
+                    for task in tasks:
+                        task.cancel(_cancelled_error_reason(exc, context.interrupt_state))
+                    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                tool_results = []
+                for tc, raw_result in zip(tool_calls, raw_results):
+                    if isinstance(raw_result, asyncio.CancelledError):
+                        reason = _cancelled_error_reason(raw_result, context.interrupt_state)
+                        normalized_result = _interrupted_tool_result(tc.id, reason)
+                    elif isinstance(raw_result, BaseException):
+                        log.exception(
+                            "tool execution raised: name=%s id=%s",
+                            tc.name,
+                            tc.id,
+                            exc_info=raw_result,
+                        )
+                        normalized_result = ToolResultBlock(
+                            tool_use_id=tc.id,
+                            content=f"Tool {tc.name} failed: {type(raw_result).__name__}: {raw_result}",
+                            is_error=True,
+                        )
+                    else:
+                        normalized_result = raw_result
+                    tool_results.append(normalized_result)
+
+                for tc, result in zip(tool_calls, tool_results):
+                    yield ToolExecutionCompleted(
+                        tool_name=tc.name,
+                        output=result.content,
+                        is_error=result.is_error,
+                    ), None
+
+                if cancelled_exc is not None:
+                    cancelled_content: list[ContentBlock] = [*tool_results]
+                    messages.append(ConversationMessage(role="user", content=cancelled_content))
+                    raise cancelled_exc
+        finally:
+            context.interrupt_state.clear_running_tool_behaviors()
+
+        tool_result_content: list[ContentBlock] = [*tool_results]
+        messages.append(ConversationMessage(role="user", content=tool_result_content))
 
     if context.max_turns is not None:
         raise MaxTurnsExceeded(context.max_turns)
@@ -874,6 +955,7 @@ async def _execute_tool_call(
     tool_use_id: str,
     tool_input: dict[str, object],
 ) -> ToolResultBlock:
+    context.interrupt_state.raise_if_requested()
     if context.hook_executor is not None:
         pre_hooks = await context.hook_executor.execute(
             HookEvent.PRE_TOOL_USE,
@@ -934,6 +1016,7 @@ async def _execute_tool_call(
                     },
                 )
             confirmed = await context.permission_prompt(tool_name, decision.reason)
+            context.interrupt_state.raise_if_requested()
             if not confirmed:
                 log.debug("permission denied by user for %s", tool_name)
                 return ToolResultBlock(
@@ -961,8 +1044,10 @@ async def _execute_tool_call(
                 **(context.tool_metadata or {}),
             },
             hook_executor=context.hook_executor,
+            interrupt_state=context.interrupt_state,
         ),
     )
+    context.interrupt_state.raise_if_requested()
     elapsed = time.monotonic() - t0
     log.debug("executed %s in %.2fs err=%s output_len=%d",
               tool_name, elapsed, result.is_error, len(result.output or ""))

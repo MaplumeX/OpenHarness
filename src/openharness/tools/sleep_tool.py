@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from typing import cast
 
 from pydantic import BaseModel, Field
 
-from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
+from openharness.tools.base import BaseTool, ToolExecutionContext, ToolInterruptBehavior, ToolResult
 
 
 class SleepToolInput(BaseModel):
@@ -22,11 +23,20 @@ class SleepTool(BaseTool):
     description = "Sleep for a short duration."
     input_model = SleepToolInput
 
-    def is_read_only(self, arguments: SleepToolInput) -> bool:
+    def is_read_only(self, arguments: BaseModel) -> bool:
         del arguments
         return True
 
-    async def execute(self, arguments: SleepToolInput, context: ToolExecutionContext) -> ToolResult:
-        del context
-        await asyncio.sleep(arguments.seconds)
-        return ToolResult(output=f"Slept for {arguments.seconds} seconds")
+    def interrupt_behavior(self) -> ToolInterruptBehavior:
+        """Allow urgent queued turns to cancel this read-only wait."""
+        return "cancel"
+
+    async def execute(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:
+        parsed = cast(SleepToolInput, arguments)
+        interrupt_state = getattr(context, "interrupt_state", None)
+        if interrupt_state is not None:
+            interrupt_state.raise_if_requested()
+        await asyncio.sleep(parsed.seconds)
+        if interrupt_state is not None:
+            interrupt_state.raise_if_requested()
+        return ToolResult(output=f"Slept for {parsed.seconds} seconds")

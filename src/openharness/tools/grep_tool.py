@@ -6,10 +6,11 @@ import asyncio
 import re
 import shutil
 from pathlib import Path
+from typing import Iterable, cast
 
 from pydantic import BaseModel, Field
 
-from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
+from openharness.tools.base import BaseTool, ToolExecutionContext, ToolInterruptBehavior, ToolResult
 
 
 class GrepToolInput(BaseModel):
@@ -30,31 +31,39 @@ class GrepTool(BaseTool):
     description = "Search file contents with a regular expression."
     input_model = GrepToolInput
 
-    def is_read_only(self, arguments: GrepToolInput) -> bool:
+    def is_read_only(self, arguments: BaseModel) -> bool:
         del arguments
         return True
 
-    async def execute(self, arguments: GrepToolInput, context: ToolExecutionContext) -> ToolResult:
-        root = _resolve_path(context.cwd, arguments.root) if arguments.root else context.cwd
+    def interrupt_behavior(self) -> ToolInterruptBehavior:
+        """Allow urgent queued turns to cancel this read-only search."""
+        return "cancel"
+
+    async def execute(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:
+        parsed = cast(GrepToolInput, arguments)
+        interrupt_state = getattr(context, "interrupt_state", None)
+        if interrupt_state is not None:
+            interrupt_state.raise_if_requested()
+        root = _resolve_path(context.cwd, parsed.root) if parsed.root else context.cwd
         if root.is_file():
             display_base = _display_base(root, context.cwd)
             matches = await _rg_grep_file(
                 path=root,
-                pattern=arguments.pattern,
-                case_sensitive=arguments.case_sensitive,
-                limit=arguments.limit,
+                pattern=parsed.pattern,
+                case_sensitive=parsed.case_sensitive,
+                limit=parsed.limit,
                 display_base=display_base,
-                timeout_seconds=arguments.timeout_seconds,
+                timeout_seconds=parsed.timeout_seconds,
             )
             if matches is not None:
-                return _format_rg_result(matches, arguments.timeout_seconds)
+                return _format_rg_result(matches, parsed.timeout_seconds)
 
             return ToolResult(
                 output=_python_grep_files(
                     paths=[root],
-                    pattern=arguments.pattern,
-                    case_sensitive=arguments.case_sensitive,
-                    limit=arguments.limit,
+                    pattern=parsed.pattern,
+                    case_sensitive=parsed.case_sensitive,
+                    limit=parsed.limit,
                     display_base=display_base,
                 )
             )
@@ -62,22 +71,22 @@ class GrepTool(BaseTool):
         # Prefer ripgrep for performance; fallback to Python when unavailable.
         matches = await _rg_grep(
             root=root,
-            pattern=arguments.pattern,
-            file_glob=arguments.file_glob,
-            case_sensitive=arguments.case_sensitive,
-            limit=arguments.limit,
-            timeout_seconds=arguments.timeout_seconds,
+            pattern=parsed.pattern,
+            file_glob=parsed.file_glob,
+            case_sensitive=parsed.case_sensitive,
+            limit=parsed.limit,
+            timeout_seconds=parsed.timeout_seconds,
         )
         if matches is not None:
-            return _format_rg_result(matches, arguments.timeout_seconds)
+            return _format_rg_result(matches, parsed.timeout_seconds)
 
         # Python fallback (kept for portability).
         return ToolResult(
             output=_python_grep_files(
-                paths=root.glob(arguments.file_glob),
-                pattern=arguments.pattern,
-                case_sensitive=arguments.case_sensitive,
-                limit=arguments.limit,
+                paths=root.glob(parsed.file_glob),
+                pattern=parsed.pattern,
+                case_sensitive=parsed.case_sensitive,
+                limit=parsed.limit,
                 display_base=root,
             )
         )
@@ -93,7 +102,7 @@ def _display_base(path: Path, cwd: Path) -> Path:
 
 def _python_grep_files(
     *,
-    paths,
+    paths: Iterable[Path],
     pattern: str,
     case_sensitive: bool,
     limit: int,
@@ -183,7 +192,7 @@ async def _rg_grep(
 
     from openharness.sandbox.session import get_docker_sandbox
 
-    session = get_docker_sandbox()
+    session = get_docker_sandbox()  # type: ignore[no-untyped-call]
     if session is not None and session.is_running:
         process = await session.exec_command(
             cmd,
@@ -251,7 +260,7 @@ async def _rg_grep_file(
 
     from openharness.sandbox.session import get_docker_sandbox
 
-    session = get_docker_sandbox()
+    session = get_docker_sandbox()  # type: ignore[no-untyped-call]
     if session is not None and session.is_running:
         process = await session.exec_command(
             cmd,

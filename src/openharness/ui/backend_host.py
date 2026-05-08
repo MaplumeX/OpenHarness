@@ -51,6 +51,7 @@ from openharness.ui.session_queue import (
     UserSubmittedLine,
 )
 from openharness.services.session_backend import SessionBackend
+from openharness.tools.base import InterruptReason
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +99,8 @@ class ReactBackendHost:
         self._running = True
         self._active_request_task: asyncio.Task[bool] | None = None
         self._active_request_cancelled = False
+        self._active_interrupt_reason: InterruptReason | None = None
+        self._active_request_cancelled_reason: InterruptReason | None = None
         self._turn_queue = SessionTurnQueue()
         self._active_turn: QueuedTurn | None = None
         self._recent_turns: deque[QueueTurnSnapshot] = deque(maxlen=20)
@@ -148,7 +151,7 @@ class ReactBackendHost:
                     await self._shutdown()
                     break
                 if request.type == "interrupt":
-                    await self._interrupt_active_request()
+                    await self._interrupt_active_request("user_cancel")
                     continue
                 if request.type in ("permission_response", "question_response"):
                     continue
@@ -208,7 +211,7 @@ class ReactBackendHost:
                     question_future.set_result(request.answer or "")
                 continue
             if request.type == "interrupt":
-                await self._interrupt_active_request()
+                await self._interrupt_active_request("user_cancel")
                 continue
             await self._request_queue.put(request)
 
@@ -216,16 +219,22 @@ class ReactBackendHost:
         task = asyncio.create_task(awaitable)
         self._active_request_task = task
         self._active_request_cancelled = False
+        self._active_request_cancelled_reason = None
+        self._active_interrupt_reason = None
         try:
             return await task
         except asyncio.CancelledError:
             self._active_request_cancelled = True
-            await self._emit(
-                BackendEvent(
-                    type="transcript_item",
-                    item=TranscriptItem(role="system", text="Interrupted by user."),
+            reason: InterruptReason = self._active_interrupt_reason or "user_cancel"
+            self._active_request_cancelled_reason = reason
+            await self._clear_active_modals()
+            if reason != "submit_interrupt":
+                await self._emit(
+                    BackendEvent(
+                        type="transcript_item",
+                        item=TranscriptItem(role="system", text="Interrupted by user."),
+                    )
                 )
-            )
             await self._emit(self._status_snapshot())
             await self._emit(BackendEvent.tasks_snapshot(get_task_manager().list_tasks()))
             await self._emit(BackendEvent(type="line_complete"))
@@ -233,6 +242,7 @@ class ReactBackendHost:
         finally:
             if self._active_request_task is task:
                 self._active_request_task = None
+                self._active_interrupt_reason = None
 
     async def _enqueue_submit_line(
         self,
@@ -246,6 +256,8 @@ class ReactBackendHost:
             priority=priority,
         )
         await self._emit_queue_snapshot()
+        if priority == "now" and await self._try_submit_interrupt_active_request():
+            return turn
         self._ensure_drain_task()
         return turn
 
@@ -262,6 +274,8 @@ class ReactBackendHost:
             priority=priority,
         )
         await self._emit_queue_snapshot()
+        if priority == "now" and await self._try_submit_interrupt_active_request():
+            return turn
         self._ensure_drain_task()
         return turn
 
@@ -297,11 +311,15 @@ class ReactBackendHost:
             await self._emit_queue_snapshot()
             should_continue = await self._run_active_request(self._execute_turn(turn))
             was_cancelled = self._active_request_cancelled
-            self._recent_turns.append(self._turn_snapshot(turn, "cancelled" if was_cancelled else "completed"))
+            cancelled_reason = self._active_request_cancelled_reason
+            snapshot = self._turn_snapshot(turn, "cancelled" if was_cancelled else "completed")
+            if was_cancelled and cancelled_reason is not None:
+                snapshot.metadata["cancel_reason"] = cancelled_reason
+            self._recent_turns.append(snapshot)
             self._active_turn = None
             self._busy = False
             await self._emit_queue_snapshot()
-            if was_cancelled:
+            if was_cancelled and cancelled_reason != "submit_interrupt":
                 return
             if not should_continue:
                 await self._shutdown()
@@ -323,16 +341,39 @@ class ReactBackendHost:
     async def _shutdown(self) -> None:
         was_running = self._running
         self._running = False
-        await self._interrupt_active_request()
+        await self._interrupt_active_request("shutdown")
         if was_running:
             await self._emit(BackendEvent(type="shutdown"))
             await self._request_queue.put(FrontendRequest(type="shutdown"))
 
-    async def _interrupt_active_request(self) -> None:
+    async def _try_submit_interrupt_active_request(self) -> bool:
+        task = self._active_request_task
+        if task is None or task.done():
+            return False
+        if self._bundle is not None and not self._bundle.engine.can_submit_interrupt():
+            return False
+        await self._interrupt_active_request("submit_interrupt")
+        return True
+
+    async def _interrupt_active_request(self, reason: InterruptReason = "user_cancel") -> None:
         task = self._active_request_task
         if task is None or task.done():
             return
-        task.cancel()
+        self._active_interrupt_reason = reason
+        if self._bundle is not None:
+            self._bundle.engine.request_interrupt(reason)
+        await self._clear_active_modals()
+        task.cancel(reason)
+
+    async def _clear_active_modals(self) -> None:
+        for permission_future in self._permission_requests.values():
+            if not permission_future.done():
+                permission_future.set_result(False)
+        for question_future in self._question_requests.values():
+            if not question_future.done():
+                question_future.set_result("")
+        if self._permission_requests or self._question_requests:
+            await self._emit(BackendEvent(type="modal_request", modal=None))
 
     async def _process_line(self, line: str, *, transcript_line: str | None = None) -> bool:
         assert self._bundle is not None

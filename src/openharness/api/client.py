@@ -79,7 +79,7 @@ ApiStreamEvent = ApiTextDeltaEvent | ApiMessageCompleteEvent | ApiRetryEvent
 class SupportsStreamingMessages(Protocol):
     """Protocol used by the query engine in tests and production."""
 
-    async def stream_message(self, request: ApiMessageRequest) -> AsyncIterator[ApiStreamEvent]:
+    def stream_message(self, request: ApiMessageRequest) -> AsyncIterator[ApiStreamEvent]:
         """Yield streamed events for the request."""
 
 
@@ -111,7 +111,7 @@ def _get_retry_delay(attempt: int, exc: Exception | None = None) -> float:
 
     delay = min(BASE_DELAY * (2 ** attempt), MAX_DELAY)
     jitter = random.uniform(0, delay * 0.25)
-    return delay + jitter
+    return float(delay + jitter)
 
 
 class AnthropicApiClient:

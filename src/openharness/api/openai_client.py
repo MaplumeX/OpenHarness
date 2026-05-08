@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from openai import AsyncOpenAI
@@ -125,7 +125,7 @@ def _convert_messages_to_openai(
     return openai_messages
 
 
-def _convert_user_content_to_openai(blocks: list[ContentBlock]) -> str | list[dict[str, Any]]:
+def _convert_user_content_to_openai(blocks: Sequence[ContentBlock]) -> str | list[dict[str, Any]]:
     """Convert user text/image blocks into OpenAI chat content."""
     has_image = any(isinstance(block, ImageBlock) for block in blocks)
     if not has_image:
@@ -233,7 +233,10 @@ class OpenAICompatibleClient:
     """
 
     def __init__(self, api_key: str, *, base_url: str | None = None, timeout: float | None = None) -> None:
-        kwargs: dict[str, Any] = {"api_key": api_key}
+        kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "default_headers": {"Authorization": f"Bearer {api_key}"},
+        }
         normalized_base_url = _normalize_openai_base_url(base_url)
         if normalized_base_url:
             kwargs["base_url"] = normalized_base_url

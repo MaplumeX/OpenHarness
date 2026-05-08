@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend baseline for review scope and expected quality checks."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify errors/cancellations are exposed through project-approved event/result patterns."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify queue/runner logging does not expose prompts, responses, secrets, or PII."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify typed async code, tests, lint, and mypy expectations."}
+{"file": ".trellis/tasks/05-08-message-queue-agent-loop/research/claude-code-agent-loop.md", "reason": "Review implementation against reference design findings."}
+{"file": ".trellis/tasks/05-08-message-queue-agent-loop/research/openharness-current-architecture.md", "reason": "Review implementation against known OpenHarness integration constraints."}

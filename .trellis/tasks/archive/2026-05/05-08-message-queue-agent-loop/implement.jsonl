@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend guideline index for Python, validation, tests, lint, type-check, and file-based state conventions."}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Needed to place queue/controller modules consistently with existing backend package layout."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Queue and agent-loop errors must surface through existing stream/protocol error patterns."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Queue/runner logging must avoid prompts, responses, secrets, and use project logging conventions."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Async queue behavior requires typed code and pytest coverage under project quality rules."}
+{"file": ".trellis/tasks/05-08-message-queue-agent-loop/research/claude-code-agent-loop.md", "reason": "Reference architecture findings from the sibling claude-code project."}
+{"file": ".trellis/tasks/05-08-message-queue-agent-loop/research/openharness-current-architecture.md", "reason": "OpenHarness-specific integration points and constraints for queue plus agent loop implementation."}
